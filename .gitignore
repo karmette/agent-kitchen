@@ -7,3 +7,4 @@ uv.lock
 # backend stuff
 db/
 log/
+clean.sh
