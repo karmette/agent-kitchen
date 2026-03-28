@@ -1,13 +1,13 @@
 import sqlite3
 import os
 import html
-import yaml
+import json
 import sys
 
 # You can set DB_PATH via environment variable or change the default here
 DB_PATH = os.environ.get("DB_PATH", "debug-database.db")
-CONFIG_PATH = os.environ.get("CONFIG_PATH", "parse-db.yml")
-OUTPUT_HTML = "output.html"
+CONFIG_PATH = os.environ.get("CONFIG_PATH", "parse-db.json")
+OUTPUT_HTML = "parsed.html"
 
 def parse_db_to_html(db_path, config_path, output_path):
     if not os.path.exists(db_path):
@@ -20,9 +20,9 @@ def parse_db_to_html(db_path, config_path, output_path):
 
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
+            config = json.load(f)
     except Exception as e:
-        print(f"Error reading YAML config: {e}")
+        print(f"Error reading JSON config: {e}")
         sys.exit(1)
         
     tables_config = config.get("tables", {})
