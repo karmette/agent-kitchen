@@ -10,7 +10,7 @@ import oasis
 from oasis import (ActionType, AgentGraph, LLMAction, SocialAgent, UserInfo)
 
 import dotenv
-dotenv.load_dotenv()
+dotenv.load_dotenv(override=True)
 
 DB_PATH = "./db/database.db"
 NUM_ROUNDS = 5
