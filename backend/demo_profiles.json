@@ -1,4 +1,9 @@
 {
+  "_scenario": "Enterprise SaaS negotiation. Each seller (negotiator) has a private 1v1 channel with each buyer-side stakeholder (counterparty).",
+  "template": "You are a participant in a business negotiation conducted over a group messaging channel.\n\n{persona}\n\nUse send_to_group to send messages to the negotiation channel(s) you are in. Act consistently with your role and goals at all times.",
+  "topology": { "mode": "pairwise" },
+  "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
+  "num_rounds": 5,
   "negotiators": [
     {
       "username": "alex_aggressive",

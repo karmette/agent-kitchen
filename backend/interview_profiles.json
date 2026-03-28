@@ -1,6 +1,13 @@
 {
   "_scenario": "Senior Software Engineer interview panel. Each candidate (negotiators) gets their own private channel with the full interviewer panel (counterparties). Interviewers send the same opening question to each room and then respond to whatever the candidate says.",
-  "_template_override": "You are a participant in a job interview conducted over a text-based panel channel.\n\n{persona}\n\nUse send_to_group to send your messages to the interview channel. Stay fully in character at all times.",
+  "template": "You are a participant in a job interview conducted over a text-based panel channel.\n\n{persona}\n\nUse send_to_group to send your messages to the interview channel. Stay fully in character at all times.",
+  "topology": {
+    "mode": "rooms",
+    "per": "negotiator",
+    "members": ["negotiator", "all_counterparties"]
+  },
+  "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
+  "num_rounds": 5,
   "negotiators": [
     {
       "username": "alex_overqualified",
