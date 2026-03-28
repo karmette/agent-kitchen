@@ -1,4 +1,9 @@
 .claude/
+.env
 
 uv.lock
 .python-version
+
+# backend stuff
+db/
+log/
