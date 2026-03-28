@@ -5,6 +5,8 @@
 uv.lock
 .python-version
 
+__pycache__/
+
 # backend stuff
 db/
 log/
