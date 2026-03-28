@@ -1,5 +1,6 @@
 .claude/
 .env
+.venv
 
 uv.lock
 .python-version
