@@ -17,10 +17,22 @@ from topology import build_topology
 import dotenv
 dotenv.load_dotenv(override=True)
 
-DB_PATH = "./db/database.db"
+DEFAULT_DB_PATH = "./db/database.db"
 
 
-async def run_scenario(scenario_path: str):
+async def run_scenario(scenario_path: str, db_path: str = None):
+    """Run a scenario from a JSON file. Returns (db_path, agents_spec).
+
+    Args:
+        scenario_path: Path to the scenario JSON file.
+        db_path: Override the database path. Defaults to ./db/database.db.
+
+    Returns:
+        Tuple of (db_path, agents_spec) where agents_spec is the list from
+        build_topology: [(agent_id, profile, is_negotiator, source_index), ...]
+    """
+    db_path = db_path or DEFAULT_DB_PATH
+
     with open(scenario_path) as f:
         scenario = json.load(f)
 
@@ -61,14 +73,14 @@ async def run_scenario(scenario_path: str):
         agent_graph.add_agent(agent)
 
     # Set up environment
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
     env = oasis.make(
         agent_graph=agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
-        database_path=DB_PATH,
+        database_path=db_path,
     )
 
     await env.reset()
@@ -99,9 +111,11 @@ async def run_scenario(scenario_path: str):
         })
 
     await env.close()
-    print(f"\n=== Done — results in {DB_PATH} ===")
+    print(f"\n=== Done — results in {db_path} ===")
+
+    return db_path, agents_spec
 
 
 if __name__ == "__main__":
-    scenario_path = sys.argv[1] if len(sys.argv) > 1 else "./demo_profiles.json"
+    scenario_path = sys.argv[1] if len(sys.argv) > 1 else "./scenarios/demo_profiles.json"
     asyncio.run(run_scenario(scenario_path))
