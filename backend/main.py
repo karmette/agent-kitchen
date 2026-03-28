@@ -14,7 +14,8 @@ dotenv.load_dotenv()
 
 DB_PATH = "./db/database.db"
 NUM_ROUNDS = 5
-PROFILES_PATH = "./demo_profiles.json"
+# PROFILES_PATH = "./demo_profiles.json"
+PROFILES_PATH = "./interview_profiles.json"
 
 # Shared system prompt template — no social-media framing
 NEGOTIATION_TEMPLATE = TextPrompt(
@@ -32,7 +33,6 @@ async def main():
 
     negotiators = profiles["negotiators"]
     counterparties = profiles["counterparties"]
-    n_neg = len(negotiators)
 
     config = {"stream": False}
     model = ModelFactory.create(
@@ -47,41 +47,46 @@ async def main():
         ActionType.DO_NOTHING,
     ]
 
+    n_cp = len(counterparties)
+
+    # A×B pairs — each pair gets its own dedicated agent instances so groups
+    # never bleed messages across conversations.
+    # Agent ID layout: pair (i,j) → negotiator = (i*n_cp + j)*2
+    #                               counterparty = (i*n_cp + j)*2 + 1
     agent_graph = AgentGraph()
 
-    # Negotiators: agent IDs 0..n_neg-1
-    for i, p in enumerate(negotiators):
-        agent = SocialAgent(
-            agent_id=i,
-            user_info=UserInfo(
-                user_name=p["username"],
-                name=p["name"],
-                description=p["bio"],
-                profile={"persona": p["persona"]},
-            ),
-            user_info_template=NEGOTIATION_TEMPLATE,
-            agent_graph=agent_graph,
-            model=model,
-            available_actions=available_actions,
-        )
-        agent_graph.add_agent(agent)
+    for i, neg_p in enumerate(negotiators):
+        for j, cp_p in enumerate(counterparties):
+            pair_idx = i * n_cp + j
+            neg_agent = SocialAgent(
+                agent_id=pair_idx * 2,
+                user_info=UserInfo(
+                    user_name=f"{neg_p['username']}_{j}",
+                    name=neg_p["name"],
+                    description=neg_p["bio"],
+                    profile={"persona": neg_p["persona"]},
+                ),
+                user_info_template=NEGOTIATION_TEMPLATE,
+                agent_graph=agent_graph,
+                model=model,
+                available_actions=available_actions,
+            )
+            agent_graph.add_agent(neg_agent)
 
-    # Counterparties: agent IDs n_neg..total-1
-    for i, p in enumerate(counterparties):
-        agent = SocialAgent(
-            agent_id=n_neg + i,
-            user_info=UserInfo(
-                user_name=p["username"],
-                name=p["name"],
-                description=p["bio"],
-                profile={"persona": p["persona"]},
-            ),
-            user_info_template=NEGOTIATION_TEMPLATE,
-            agent_graph=agent_graph,
-            model=model,
-            available_actions=available_actions,
-        )
-        agent_graph.add_agent(agent)
+            cp_agent = SocialAgent(
+                agent_id=pair_idx * 2 + 1,
+                user_info=UserInfo(
+                    user_name=f"{cp_p['username']}_{i}",
+                    name=cp_p["name"],
+                    description=cp_p["bio"],
+                    profile={"persona": cp_p["persona"]},
+                ),
+                user_info_template=NEGOTIATION_TEMPLATE,
+                agent_graph=agent_graph,
+                model=model,
+                available_actions=available_actions,
+            )
+            agent_graph.add_agent(cp_agent)
 
     # Set up environment
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -96,25 +101,25 @@ async def main():
 
     await env.reset()
 
-    # Bootstrap: each negotiator creates a room, all counterparties join it
+    # Bootstrap: one group per (negotiator, counterparty) pair
     # TODO: replace groups with a proper conversation channel when available
-    print("=== Setting up negotiation rooms ===")
-    for i, neg_profile in enumerate(negotiators):
-        neg_agent = env.agent_graph.get_agent(i)
-        result = await neg_agent.perform_action_by_data(
-            ActionType.CREATE_GROUP,
-            group_name=f"negotiation_{neg_profile['username']}",
-        )
-        group_id = result["group_id"]
-        print(f"  [{neg_profile['username']}] created group {group_id}")
+    print("=== Setting up conversation rooms ===")
+    for i, neg_p in enumerate(negotiators):
+        for j, cp_p in enumerate(counterparties):
+            pair_idx = i * n_cp + j
+            neg_agent = env.agent_graph.get_agent(pair_idx * 2)
+            cp_agent = env.agent_graph.get_agent(pair_idx * 2 + 1)
 
-        for j in range(len(counterparties)):
-            cp_agent = env.agent_graph.get_agent(n_neg + j)
+            result = await neg_agent.perform_action_by_data(
+                ActionType.CREATE_GROUP,
+                group_name=f"{neg_p['username']}_x_{cp_p['username']}",
+            )
+            group_id = result["group_id"]
             await cp_agent.perform_action_by_data(
                 ActionType.JOIN_GROUP,
                 group_id=group_id,
             )
-        print(f"  All counterparties joined group {group_id}")
+            print(f"  Group {group_id}: {neg_p['username']} ↔ {cp_p['username']}")
 
     # Simulation rounds — all agents act via LLM each round
     for round_num in range(1, NUM_ROUNDS + 1):
