@@ -1,35 +1,31 @@
 """Mutation operators for AgentGenome, modeled on biological evolution.
 
 Mutation types mirror real genetics:
-
 - Point mutation:  Small tweak to one section (most common, like SNPs)
 - Rewrite:         Larger rewrite of one section (like gene-level mutation)
-- Crossover:       Combine sections from two parents (sexual reproduction)
 - Insertion:       Add a new element to a section
 - Deletion:        Remove an element from a section
+- Crossover:       Combine sections from two parents (sexual reproduction)
 
-In nature, small mutations dominate. Radical changes are rare but
-occasionally produce breakthroughs. The weights below reflect that.
+Small mutations dominate. Radical changes are rare but occasionally
+produce breakthroughs. The weights below reflect that.
 """
 
-import json
 import random
 
-from openai import AsyncOpenAI
-
 from genome import AgentGenome, SECTIONS
+from llm import create_client, complete
 
 # How often each mutation type fires (weights, not probabilities)
 MUTATION_WEIGHTS = {
-    "point":     50,  # most common — small local tweaks
-    "rewrite":   20,  # less common — rethink a whole section
-    "insertion": 10,  # add a new tactic, constraint, etc.
-    "deletion":  10,  # remove something that might be deadweight
-    "crossover": 10,  # requires two parents — called separately
+    "point":     50,
+    "rewrite":   20,
+    "insertion": 10,
+    "deletion":  10,
+    "crossover": 10,
 }
 
 # Sections that change easily vs. slowly (mirrors evolutionary rates)
-# Role/constraints are conserved; tactics/style are volatile
 SECTION_VOLATILITY = {
     "role":        1,
     "goals":       2,
@@ -96,29 +92,26 @@ If the section only has one element, return it unchanged.\
 
 
 def _pick_section() -> str:
-    """Pick a section to mutate, weighted by volatility."""
     sections = list(SECTION_VOLATILITY.keys())
     weights = [SECTION_VOLATILITY[s] for s in sections]
     return random.choices(sections, weights=weights, k=1)[0]
 
 
 def _pick_mutation_type() -> str:
-    """Pick a mutation type, weighted by frequency."""
     types = list(MUTATION_WEIGHTS.keys())
     weights = [MUTATION_WEIGHTS[t] for t in types]
     return random.choices(types, weights=weights, k=1)[0]
 
 
 class Mutator:
-    def __init__(self, model: str = "gpt-4o"):
-        self.model = model
-        self.client = AsyncOpenAI()
+    def __init__(self, model: str = None):
+        from llm import get_model
+        self.model = model or get_model()
+        self.client = create_client()
 
     async def mutate(self, parent: AgentGenome, generation: int) -> AgentGenome:
         """Apply a random mutation to a parent genome and return the child."""
         mutation_type = _pick_mutation_type()
-
-        # Crossover needs two parents — fall back to point mutation
         if mutation_type == "crossover":
             mutation_type = "point"
 
@@ -126,58 +119,26 @@ class Mutator:
         current = getattr(parent, section)
 
         if mutation_type == "point":
-            prompt = POINT_MUTATION_PROMPT.format(
-                section_name=section, content=current,
-            )
+            prompt = POINT_MUTATION_PROMPT.format(section_name=section, content=current)
         elif mutation_type == "rewrite":
-            prompt = REWRITE_PROMPT.format(
-                section_name=section, content=current,
-                full_genome=parent.to_prompt(),
-            )
+            prompt = REWRITE_PROMPT.format(section_name=section, content=current, full_genome=parent.to_prompt())
         elif mutation_type == "insertion":
-            prompt = INSERTION_PROMPT.format(
-                section_name=section, content=current,
-                full_genome=parent.to_prompt(),
-            )
+            prompt = INSERTION_PROMPT.format(section_name=section, content=current, full_genome=parent.to_prompt())
         elif mutation_type == "deletion":
-            prompt = DELETION_PROMPT.format(
-                section_name=section, content=current,
-            )
+            prompt = DELETION_PROMPT.format(section_name=section, content=current)
 
-        new_content = await self._llm_call(prompt)
+        new_content = await complete(self.client, self.model, prompt, temperature=1.0)
 
-        # Build child with mutated section
         child_sections = parent.sections()
         child_sections[section] = new_content
 
-        return AgentGenome(
-            **child_sections,
-            generation=generation,
-            parent_ids=[parent.genome_id],
-        )
+        return AgentGenome(**child_sections, generation=generation, parent_ids=[parent.genome_id])
 
-    async def crossover(
-        self, parent_a: AgentGenome, parent_b: AgentGenome, generation: int,
-    ) -> AgentGenome:
+    async def crossover(self, parent_a: AgentGenome, parent_b: AgentGenome, generation: int) -> AgentGenome:
         """Sexual reproduction: randomly take each section from one parent."""
         child_sections = {}
-        parents_used = []
-
         for section in SECTIONS:
             donor = random.choice([parent_a, parent_b])
             child_sections[section] = getattr(donor, section)
-            parents_used.append((section, donor.genome_id[:8]))
 
-        return AgentGenome(
-            **child_sections,
-            generation=generation,
-            parent_ids=[parent_a.genome_id, parent_b.genome_id],
-        )
-
-    async def _llm_call(self, prompt: str) -> str:
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=1.0,
-        )
-        return response.choices[0].message.content.strip()
+        return AgentGenome(**child_sections, generation=generation, parent_ids=[parent_a.genome_id, parent_b.genome_id])

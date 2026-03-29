@@ -1,9 +1,17 @@
-"""Generic OASIS simulation runner. All scenario config lives in the profile JSON."""
+"""Generic OASIS simulation runner. All scenario config lives in the profile JSON.
+
+Emits real-time JSONL events to stdout as agents send messages.
+Human-readable progress goes to stderr.
+"""
 
 import asyncio
 import json
+import logging
 import os
 import sys
+
+# Force all logging to stderr before importing noisy libraries
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 from camel.models import ModelFactory
 from camel.prompts import TextPrompt
@@ -13,6 +21,7 @@ import oasis
 from oasis import (ActionType, AgentGraph, LLMAction, SocialAgent, UserInfo)
 
 from topology import build_topology
+from events import emit, poll_messages
 
 import dotenv
 dotenv.load_dotenv(override=True)
@@ -20,23 +29,27 @@ dotenv.load_dotenv(override=True)
 DEFAULT_DB_PATH = "./db/database.db"
 
 
-async def run_scenario(scenario_path: str, db_path: str = None):
-    """Run a scenario from a JSON file. Returns (db_path, agents_spec).
+def log(msg: str):
+    """Print to stderr (human-readable, not for Go TUI)."""
+    print(msg, file=sys.stderr)
+
+
+async def run_scenario(scenario_path: str, db_path: str = None, generation: int = 0):
+    """Run a scenario from a JSON file.
 
     Args:
         scenario_path: Path to the scenario JSON file.
-        db_path: Override the database path. Defaults to ./db/database.db.
+        db_path: Override the database path.
+        generation: Generation number for event metadata.
 
     Returns:
-        Tuple of (db_path, agents_spec) where agents_spec is the list from
-        build_topology: [(agent_id, profile, is_negotiator, source_index), ...]
+        Tuple of (db_path, agents_spec)
     """
     db_path = db_path or DEFAULT_DB_PATH
 
     with open(scenario_path) as f:
         scenario = json.load(f)
 
-    # Read all config from the scenario JSON
     template = TextPrompt(scenario["template"])
     topology_config = scenario.get("topology", {"mode": "pairwise"})
     action_names = scenario.get("actions", ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"])
@@ -56,6 +69,8 @@ async def run_scenario(scenario_path: str, db_path: str = None):
     )
 
     agent_graph = AgentGraph()
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr  # suppress CAMEL warnings from stdout
     for agent_id, profile, is_negotiator, source_idx in agents_spec:
         agent = SocialAgent(
             agent_id=agent_id,
@@ -72,23 +87,30 @@ async def run_scenario(scenario_path: str, db_path: str = None):
         )
         agent_graph.add_agent(agent)
 
+    sys.stdout = _real_stdout
+
     # Set up environment
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     if os.path.exists(db_path):
         os.remove(db_path)
 
+    # Suppress OASIS's stray print statements during setup
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr
     env = oasis.make(
         agent_graph=agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
         database_path=db_path,
     )
+    sys.stdout = _real_stdout
 
     await env.reset()
 
     # Wire up groups
-    print(f"=== {scenario.get('_scenario', scenario_path)} ===")
-    print(f"    {len(agents_spec)} agents, {len(groups_spec)} groups, {num_rounds} rounds")
-    print()
+    emit({"type": "simulation_start", "generation": generation,
+          "num_agents": len(agents_spec), "num_groups": len(groups_spec),
+          "num_rounds": num_rounds})
+
     for group_name, member_ids in groups_spec:
         creator = env.agent_graph.get_agent(member_ids[0])
         result = await creator.perform_action_by_data(
@@ -100,18 +122,36 @@ async def run_scenario(scenario_path: str, db_path: str = None):
             await member.perform_action_by_data(
                 ActionType.JOIN_GROUP, group_id=group_id,
             )
-        print(f"  Group {group_id} ({group_name}): agents {member_ids}")
+        log(f"  Group {group_id} ({group_name}): agents {member_ids}")
+
+    # Start message poller for real-time streaming
+    stop_poller = asyncio.Event()
+    poller_task = asyncio.create_task(
+        poll_messages(db_path, agents_spec, stop_poller, generation)
+    )
 
     # Simulation rounds
     for round_num in range(1, num_rounds + 1):
-        print(f"\n=== Round {round_num}/{num_rounds} ===")
+        emit({"type": "round_start", "generation": generation, "round": round_num,
+              "total_rounds": num_rounds})
+        log(f"\n  Round {round_num}/{num_rounds}")
+
         await env.step({
             agent: LLMAction()
             for _, agent in env.agent_graph.get_agents()
         })
 
+        emit({"type": "round_complete", "generation": generation, "round": round_num})
+
+    # Stop poller, give it one last poll cycle
+    await asyncio.sleep(0.6)
+    stop_poller.set()
+    await poller_task
+
     await env.close()
-    print(f"\n=== Done — results in {db_path} ===")
+
+    emit({"type": "simulation_complete", "generation": generation, "db_path": db_path})
+    log(f"\n  Simulation complete — {db_path}")
 
     return db_path, agents_spec
 

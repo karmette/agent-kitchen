@@ -1,9 +1,10 @@
 [project]
-name = "backend"
+name = "agent-kitchen"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
+description = "Evolutionary agent optimization via OASIS social simulations"
 requires-python = ">=3.11"
 dependencies = [
     "camel-oasis>=0.2.5",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
 ]
