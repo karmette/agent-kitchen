@@ -4,8 +4,6 @@
 
 Agent Kitchen evolves the best AI agent for any social interaction by running natural selection inside [OASIS](https://github.com/camel-ai/oasis) social simulations. Describe the agent you want — "best negotiator", "best teacher", "best marketer" — and the system breeds a population of competing agents across diverse scenarios until the fittest prompt emerges.
 
-No manual prompt writing. No guesswork. Just evolution.
-
 ---
 
 ## How It Works
@@ -84,7 +82,6 @@ Each scenario automatically picks the right OASIS primitives:
 - **Social mode** — public posts/comments/likes for marketing, debate, outreach
 - **Mixed mode** — both private and public interaction in one scenario
 
-The agents don't just chat — they operate in a realistic social environment where their actions have consequences (likes, follows, replies from others).
 
 ---
 
@@ -198,10 +195,6 @@ go build -o agent-kitchen
 
 ---
 
-## Team
 
-Built at the TAMU Datathon 2026 by the Karmette team.
 
----
-
-*The best prompt is the one you never had to write.*
+*AI slop implies the existence of AI peak*
