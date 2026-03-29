@@ -54,13 +54,28 @@ class AgentGenome:
     def to_prompt(self) -> str:
         """Render the full prompt string for use as an OASIS persona."""
         return GENOME_TEMPLATE.format(
-            role=self.role,
-            goals=self.goals,
-            strategy=self.strategy,
-            tactics=self.tactics,
-            style=self.style,
-            constraints=self.constraints,
+            role=self._clean(self.role),
+            goals=self._clean(self.goals),
+            strategy=self._clean(self.strategy),
+            tactics=self._clean(self.tactics),
+            style=self._clean(self.style),
+            constraints=self._clean(self.constraints),
         )
+
+    @staticmethod
+    def _clean(value) -> str:
+        """Clean up LLM output that might be a list instead of text."""
+        if isinstance(value, list):
+            return "\n".join(f"- {item}" for item in value)
+        text = str(value).strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                items = json.loads(text)
+                if isinstance(items, list):
+                    return "\n".join(f"- {item}" for item in items)
+            except json.JSONDecodeError:
+                pass
+        return text
 
     def sections(self) -> dict[str, str]:
         """Return all evolvable sections as a dict."""

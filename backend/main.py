@@ -102,7 +102,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
         agent_graph=agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
         database_path=db_path,
-        semaphore=256,
+        semaphore=64,
     )
     sys.stdout = _real_stdout
 

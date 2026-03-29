@@ -50,19 +50,28 @@ Generate {num_scenarios} DIVERSE scenarios that test DIFFERENT aspects of \
 this skill. Each scenario should be a distinct situation with different \
 dynamics, stakes, and counterparty types.
 
-For example, if the goal is "best negotiator", scenarios might be:
-- Salary negotiation with a hiring manager
-- Vendor contract negotiation with a procurement officer
-- Used car haggling with a dealership salesman
+Examples by goal type:
+- "best negotiator" → salary negotiation, vendor contract, used car haggling
+- "best marketing agent" → pitching to skeptics, engaging on social media, cold outreach
+- "best interviewer" → technical interview panel, behavioral screening, culture fit
+- "best customer service agent" → angry customer, refund request, technical support
+- "best teacher" → explaining to a beginner, helping a struggling student, advanced Q&A
+- "best salesperson" → cold pitch, handling objections, closing a warm lead
+- "best mediator" → workplace conflict, neighbor dispute, contract disagreement
 
 Each scenario must be CONCRETE — specific stakes, specific context, not \
 vague. Each scenario independently defines its own topology and counterparties.
+
+Choose the right topology for each scenario:
+- 1v1 conversations (sales, negotiation, support) → pairwise
+- Panel interactions (interviews, pitches to a committee) → rooms with multiple counterparties
+- Group dynamics (team mediation, classroom) → rooms with multiple counterparties
 
 Return ONLY valid JSON — an array of scenario objects:
 [
   {{
     "_scenario": "one-line description (e.g. 'Salary negotiation for a senior engineer role')",
-    "template": "You are in a conversation. [Specific situation, stakes, what both sides want.] Your approach: {{persona}} Use send_to_group to communicate. Be direct.",
+    "template": "You are in a conversation. [Specific situation, stakes, what both sides want.] Your approach: {{persona}} Use send_to_group to communicate. Send plain text messages only — never wrap in JSON.",
     "topology": <topology object>,
     "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
     "num_rounds": 4,
@@ -77,20 +86,15 @@ Return ONLY valid JSON — an array of scenario objects:
   }}
 ]
 
-Topology options per scenario:
+Topology JSON options:
 - 1v1: {{"mode": "pairwise"}}
-- Panel (1 evolved agent + multiple counterparties): {{"mode": "rooms", "per": "negotiator", "members": ["negotiator", "all_counterparties"]}}
-- Shared room (all evolved agents + counterparties together): {{"mode": "rooms", "per": "counterparty", "members": ["counterparty", "all_negotiators"]}}
+- Panel/group: {{"mode": "rooms", "per": "negotiator", "members": ["negotiator", "all_counterparties"]}}
 
 The "per" field MUST be "negotiator" or "counterparty".
 The "members" MUST be a list from: "negotiator", "counterparty", "all_negotiators", "all_counterparties".
 
-Choose the topology that fits each scenario naturally. A 1v1 negotiation is \
-pairwise. An interview with a panel is rooms. Each scenario can be different.
-
-Keep all scenarios realistic and professional — everyday business, workplace, \
-or consumer situations. No hostage situations, warfare, or extreme scenarios. \
-Each scenario should have 1-2 counterparties maximum for speed.
+Keep all scenarios realistic — everyday business, workplace, or consumer \
+situations. Each scenario should have 1-2 counterparties for speed.
 """
 
 RUBRIC_GENERATION_PROMPT = """\
@@ -372,7 +376,8 @@ class Orchestrator:
                 genome = population[src_idx]
                 emit({"type": "score", "generation": gen, "genome_id": genome.genome_id,
                       "overall": agg_scores[src_idx],
-                      "scenario_scores": scenario_scores})
+                      "scenario_scores": scenario_scores,
+                      "parent_ids": genome.parent_ids})
                 log(f"    [{genome.genome_id}] avg={agg_scores[src_idx]:.2f} scenarios={scenario_scores}")
 
             self._save_json({
@@ -408,8 +413,11 @@ class Orchestrator:
                 log(f"    {i+1}. [{population[idx].genome_id}] avg={agg_scores[idx]:.2f}{marker}")
 
             save_checkpoint(self.run_dir, gen, population, best_genome, best_score, scenarios, self.rubric)
+            all_avgs = [v for v in agg_scores.values() if v > 0]
+            pop_avg = sum(all_avgs) / len(all_avgs) if all_avgs else 0.0
             emit({"type": "generation_complete", "generation": gen,
-                  "best_score": best_score, "diversity": diversity})
+                  "best_score": best_score, "avg_score": round(pop_avg, 3),
+                  "diversity": diversity})
 
             if gen < self.num_generations - 1:
                 population = await self._evolve(survivors, gen + 1)
@@ -435,7 +443,7 @@ class Orchestrator:
 
         emit({"type": "evolution_complete", "best_genome_id": best_genome.genome_id,
               "best_score": best_score, "best_prompt": best_genome.to_prompt(),
-              "run_dir": self.run_dir})
+              "rubric": self.rubric, "run_dir": self.run_dir})
         return best_genome
 
     # ── Scenario generation ──────────────────────────────────────────────
@@ -571,6 +579,11 @@ class Orchestrator:
 
 def main():
     import argparse
+    import resource
+    # Increase file descriptor limit for parallel OASIS instances
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 4096), hard))
+
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 

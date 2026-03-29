@@ -12,13 +12,29 @@ var (
 	inputContainer = lg.NewStyle().
 			Border(lg.RoundedBorder()).
 			BorderForeground(lg.Color("#7D56F4")).
-			Padding(1, 2)
+			Padding(1, 3)
 
-	instructionStyle = lg.NewStyle().Foreground(lg.Color("#626262"))
+	labelStyle = lg.NewStyle().
+			Foreground(lg.Color("#7D56F4")).
+			Bold(true)
+
+	sublabelStyle = lg.NewStyle().
+			Foreground(lg.Color("#555555"))
+
+	instructionStyle = lg.NewStyle().
+				Foreground(lg.Color("#444444"))
 )
+
+const logo = `
+   ▄▀█ █▀▀ █▀▀ █▄░█ ▀█▀
+   █▀█ █▄█ ██▄ █░▀█ ░█░
+
+   █▄▀ █ ▀█▀ █▀▀ █░█ █▀▀ █▄░█
+   █░█ █ ░█░ █▄▄ █▀█ ██▄ █░▀█`
 
 type InputModel struct {
 	textInput    textinput.Model
+	rubricTi     textinput.Model
 	iterationsTi textinput.Model
 	cellsTi      textinput.Model
 	done         bool
@@ -27,20 +43,25 @@ type InputModel struct {
 
 func NewInputModel(iterations, cells int) InputModel {
 	ti := textinput.New()
-	ti.Placeholder = "Enter a prompt..."
+	ti.Placeholder = "e.g. best negotiator, best teacher, best salesperson"
 	ti.Focus()
-	ti.SetWidth(40)
+	ti.SetWidth(50)
+
+	rubricTi := textinput.New()
+	rubricTi.Placeholder = "e.g. empathy, closes deals, creative solutions"
+	rubricTi.SetWidth(50)
 
 	iterTi := textinput.New()
-	iterTi.Placeholder = "Iterations"
-	iterTi.SetWidth(40)
+	iterTi.Placeholder = "5"
+	iterTi.SetWidth(50)
 
 	cellsTi := textinput.New()
-	cellsTi.Placeholder = "Cells"
-	cellsTi.SetWidth(40)
+	cellsTi.Placeholder = "3"
+	cellsTi.SetWidth(50)
 
 	return InputModel{
 		textInput:    ti,
+		rubricTi:     rubricTi,
 		iterationsTi: iterTi,
 		cellsTi:      cellsTi,
 		done:         false,
@@ -49,9 +70,14 @@ func NewInputModel(iterations, cells int) InputModel {
 }
 
 func (m *InputModel) SetWidth(w int) {
-	m.textInput.SetWidth(40)
-	m.iterationsTi.SetWidth(40)
-	m.cellsTi.SetWidth(40)
+	width := 50
+	if w < 60 {
+		width = w - 10
+	}
+	m.textInput.SetWidth(width)
+	m.rubricTi.SetWidth(width)
+	m.iterationsTi.SetWidth(width)
+	m.cellsTi.SetWidth(width)
 }
 
 func (m InputModel) Init() tea.Cmd {
@@ -70,14 +96,14 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		case "enter":
 			m.done = true
 			return m, nil
-		case "up":
+		case "up", "shift+tab":
 			if m.focusedField > 0 {
 				m.focusedField--
 				m.updateFocus()
 			}
 			handled = true
-		case "down":
-			if m.focusedField < 2 {
+		case "down", "tab":
+			if m.focusedField < 3 {
 				m.focusedField++
 				m.updateFocus()
 			}
@@ -90,8 +116,10 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 		case 0:
 			m.textInput, cmd = m.textInput.Update(msg)
 		case 1:
-			m.iterationsTi, cmd = m.iterationsTi.Update(msg)
+			m.rubricTi, cmd = m.rubricTi.Update(msg)
 		case 2:
+			m.iterationsTi, cmd = m.iterationsTi.Update(msg)
+		case 3:
 			m.cellsTi, cmd = m.cellsTi.Update(msg)
 		}
 	}
@@ -99,41 +127,58 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 }
 
 func (m *InputModel) updateFocus() {
-	switch m.focusedField {
-	case 0:
-		m.textInput.Focus()
-		m.iterationsTi.Blur()
-		m.cellsTi.Blur()
-	case 1:
-		m.textInput.Blur()
-		m.iterationsTi.Focus()
-		m.cellsTi.Blur()
-	case 2:
-		m.textInput.Blur()
-		m.iterationsTi.Blur()
-		m.cellsTi.Focus()
+	fields := []*textinput.Model{&m.textInput, &m.rubricTi, &m.iterationsTi, &m.cellsTi}
+	for i, f := range fields {
+		if i == m.focusedField {
+			f.Focus()
+		} else {
+			f.Blur()
+		}
 	}
 }
 
 func (m InputModel) View() string {
+	logoRendered := lg.NewStyle().
+		Foreground(lg.Color("#7D56F4")).
+		Bold(true).
+		Render(logo)
+
+	tagline := lg.NewStyle().
+		Foreground(lg.Color("#3993ED")).
+		Italic(true).
+		Render("   replace prompt engineering with evolution")
+
 	s := lg.JoinVertical(lg.Left,
-		lg.NewStyle().Bold(true).Render("Prompt Terminal"),
-		"\n",
+		logoRendered,
+		"",
+		tagline,
+		"",
+		"",
+		labelStyle.Render("  What agent do you want to evolve?"),
 		m.textInput.View(),
-		"\n",
-		lg.NewStyle().Foreground(lg.Color("#888888")).Render("Options:"),
+		"",
+		sublabelStyle.Render("  Optimize for (leave blank for auto)"),
+		m.rubricTi.View(),
+		"",
+		sublabelStyle.Render("  Generations"),
 		m.iterationsTi.View(),
+		"",
+		sublabelStyle.Render("  Scenarios (cells)"),
 		m.cellsTi.View(),
-		"\n",
-		instructionStyle.Render("press enter to run • up/down to navigate • esc to quit"),
+		"",
+		instructionStyle.Render("  enter to evolve • ↑↓ navigate • esc quit"),
 	)
 	return inputContainer.Render(s)
+}
+
+func (m InputModel) GetRubric() string {
+	return m.rubricTi.Value()
 }
 
 func (m InputModel) GetIterations() int {
 	val, err := strconv.Atoi(m.iterationsTi.Value())
 	if err != nil || val < 1 {
-		return 10
+		return 5
 	}
 	return val
 }
@@ -141,7 +186,7 @@ func (m InputModel) GetIterations() int {
 func (m InputModel) GetCells() int {
 	val, err := strconv.Atoi(m.cellsTi.Value())
 	if err != nil || val < 1 {
-		return 25
+		return 3
 	}
 	return val
 }

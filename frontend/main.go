@@ -67,7 +67,8 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.result = NewResultModel(rows, cols, iterations, cells)
 			m.result.width = m.width
 			m.result.height = m.height
-			RunBackend(m.result.cells, m.prompt, iterations, cells)
+			rubric := m.input.GetRubric()
+			RunBackend(m.result.cells, m.prompt, rubric, iterations, cells)
 		}
 
 	case resultView:
