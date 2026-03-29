@@ -71,7 +71,7 @@ Return ONLY valid JSON — an array of scenario objects:
 [
   {{
     "_scenario": "one-line description (e.g. 'Salary negotiation for a senior engineer role')",
-    "template": "You are in a conversation. [Specific situation, stakes, what both sides want.] Your approach: {{persona}} Use send_to_group to communicate. Send plain text messages only — never wrap in JSON.",
+    "template": "You are in a conversation. [Specific situation, stakes, what both sides want.] Your approach: {{persona}} Use send_to_group to communicate. Write short, direct chat messages — no emails, no letters, no signatures, no JSON. Talk like a person in a live chat.",
     "topology": <topology object>,
     "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
     "num_rounds": 4,
@@ -95,6 +95,10 @@ The "members" MUST be a list from: "negotiator", "counterparty", "all_negotiator
 
 Keep all scenarios realistic — everyday business, workplace, or consumer \
 situations. Each scenario should have 1-2 counterparties for speed.
+
+IMPORTANT: Every scenario MUST be fundamentally different — different \
+settings, different relationship dynamics, different stakes. Each should test a genuinely \
+distinct skill.
 """
 
 RUBRIC_GENERATION_PROMPT = """\
@@ -517,20 +521,35 @@ class Orchestrator:
     async def _evolve(self, survivors, generation):
         next_gen = list(survivors)
         tasks = []
+        operations = []  # track what each task does
         for _ in range(self.population_size - len(next_gen)):
             if len(survivors) >= 2 and random.random() < 0.3:
                 a, b = random.sample(survivors, 2)
                 tasks.append(self.mutator.crossover(a, b, generation))
+                operations.append(("crossover", a.genome_id, b.genome_id))
             else:
-                tasks.append(self.mutator.mutate(random.choice(survivors), generation))
+                parent = random.choice(survivors)
+                tasks.append(self.mutator.mutate(parent, generation))
+                operations.append(("mutate", parent.genome_id, None))
+
         children = await asyncio.gather(*tasks, return_exceptions=True)
-        for child in children:
+        for i, child in enumerate(children):
+            op, parent1, parent2 = operations[i]
             if isinstance(child, Exception):
                 f = random.choice(survivors)
-                next_gen.append(AgentGenome(**f.sections(), generation=generation,
-                                            parent_ids=[f.genome_id]))
+                child = AgentGenome(**f.sections(), generation=generation,
+                                    parent_ids=[f.genome_id])
+                emit({"type": "breed", "operation": "clone",
+                      "child": child.genome_id[:8], "parent": f.genome_id[:8]})
             else:
-                next_gen.append(child)
+                if op == "crossover":
+                    emit({"type": "breed", "operation": "crossover",
+                          "child": child.genome_id[:8],
+                          "parent_a": parent1[:8], "parent_b": parent2[:8]})
+                else:
+                    emit({"type": "breed", "operation": "mutate",
+                          "child": child.genome_id[:8], "parent": parent1[:8]})
+            next_gen.append(child)
         return next_gen[:self.population_size]
 
     async def _inject_diversity(self, population, generation, scenario_descriptions):

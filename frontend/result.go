@@ -81,10 +81,13 @@ const (
 )
 
 type cell struct {
-	status   CellStatus
-	conv     conversation
-	content  strings.Builder
-	scenario string
+	status    CellStatus
+	conv      conversation
+	content   strings.Builder              // first agent's conversation (for preview)
+	agents    map[int]*strings.Builder     // group_id -> conversation content
+	agentIDs  []int                        // ordered group_ids as they appear
+	scenario  string
+	activeTab int                          // which agent tab is selected in detail view
 }
 
 type ViewMode int
@@ -115,6 +118,7 @@ func NewResultModel(rows, cols, iterations, numCells int) *ResultModel {
 	for i := range cells {
 		cells[i].status = StatusPending
 		cells[i].conv = newConversation()
+		cells[i].agents = make(map[int]*strings.Builder)
 	}
 	return &ResultModel{
 		rows: rows, cols: cols, iterations: iterations,
@@ -164,7 +168,13 @@ func (m *ResultModel) Update(msg tea.Msg) tea.Cmd {
 				m.mode = ModeGrid
 			}
 		case "h", "left":
-			if m.mode == ModeGrid {
+			if m.mode == ModeDetail {
+				cidx := m.focusedRow*m.cols + m.focusedCol
+				if cidx < len(m.cells) && m.cells[cidx].activeTab > 0 {
+					m.cells[cidx].activeTab--
+					m.detailScroll = 0
+				}
+			} else if m.mode == ModeGrid {
 				idx := m.focusedRow*m.cols + m.focusedCol - 1
 				if idx < 0 {
 					idx = len(m.cells) - 1
@@ -173,7 +183,13 @@ func (m *ResultModel) Update(msg tea.Msg) tea.Cmd {
 				m.focusedCol = idx % m.cols
 			}
 		case "l", "right":
-			if m.mode == ModeGrid {
+			if m.mode == ModeDetail {
+				cidx := m.focusedRow*m.cols + m.focusedCol
+				if cidx < len(m.cells) && m.cells[cidx].activeTab < len(m.cells[cidx].agentIDs)-1 {
+					m.cells[cidx].activeTab++
+					m.detailScroll = 0
+				}
+			} else if m.mode == ModeGrid {
 				idx := m.focusedRow*m.cols + m.focusedCol + 1
 				if idx >= len(m.cells) {
 					idx = 0
@@ -264,6 +280,12 @@ func (m *ResultModel) View() string {
 		main = m.viewGrid(iw, mainHeight)
 	}
 
+	// Pad main to full height so status bar is always at the bottom
+	mainLines := strings.Count(main, "\n") + 1
+	if mainLines < mainHeight {
+		main += strings.Repeat("\n", mainHeight-mainLines)
+	}
+
 	return container.Render(main + "\n" + statusBar)
 }
 
@@ -276,7 +298,7 @@ func (m *ResultModel) viewStatusBar(w int) string {
 		gen := CurrentGeneration
 		total := m.iterations
 		left = accent.Render(fmt.Sprintf(" Gen %d/%d ", gen+1, total))
-		barWidth := 20
+		barWidth := 15
 		if total > 0 {
 			filled := ((gen + 1) * barWidth) / total
 			if filled > barWidth {
@@ -285,20 +307,23 @@ func (m *ResultModel) viewStatusBar(w int) string {
 			left += accent.Render(strings.Repeat("▓", filled)) +
 				dim.Render(strings.Repeat("░", barWidth-filled)) + " "
 		}
+		if CurrentBestScore > 0 {
+			left += greenText.Render(fmt.Sprintf("best: %.0f%% ", CurrentBestScore*100))
+		}
 	}
 
 	right := ""
 	switch m.mode {
 	case ModeGrid:
-		right = softText.Render("enter expand · ")
+		right = softText.Render("enter: expand · ")
 		if FinalResult != nil {
-			right += accent.Render("r results · ")
+			right += accent.Render("r: results · ")
 		}
-		right += softText.Render("q quit")
+		right += softText.Render("q: quit")
 	case ModeDetail:
-		right = softText.Render("↑↓ scroll · esc back · q quit")
+		right = softText.Render("↑↓: scroll · esc: back · q: quit")
 	case ModeResult:
-		right = softText.Render("↑↓ scroll · esc back · q quit")
+		right = softText.Render("↑↓: scroll · esc: back · q: quit")
 	}
 
 	gap := w - lg.Width(left) - lg.Width(right)
@@ -342,12 +367,20 @@ func (m *ResultModel) viewGrid(w, h int) string {
 				style = cellDone
 			}
 
-			// Header bar
+			// Header bar with scenario name
 			statusStr := string(cell.status)
 			if cell.status == StatusRunning {
 				statusStr = spinner(m.tick)
 			}
-			headerText := fmt.Sprintf(" S%d %s ", idx+1, statusStr)
+			name := cell.scenario
+			if name == "" {
+				name = fmt.Sprintf("Scenario %d", idx+1)
+			}
+			maxNameLen := cellWidth - 8
+			if maxNameLen > 0 && len(name) > maxNameLen {
+				name = name[:maxNameLen-1] + "…"
+			}
+			headerText := fmt.Sprintf(" %s %s ", statusStr, name)
 			padLen := cellWidth - len([]rune(headerText)) - 2
 			if padLen > 0 {
 				headerText += strings.Repeat(" ", padLen)
@@ -387,14 +420,14 @@ func (m *ResultModel) viewGrid(w, h int) string {
 func (m *ResultModel) viewSidePanel(w, h int) string {
 	var items []string
 
-	brand := lg.NewStyle().Foreground(purple).Bold(true).Render("⬡ agent kitchen")
+	brand := lg.NewStyle().Foreground(purple).Bold(true).Render("agent kitchen")
 	items = append(items, brand)
 	items = append(items, "")
 
-	// Status
 	if FinalResult != nil {
-		items = append(items, greenText.Bold(true).Render("✓ Complete"))
-		items = append(items, accent.Render("  r → results"))
+		items = append(items, greenText.Bold(true).Render("✓ evolution complete"))
+		items = append(items, greenText.Render(fmt.Sprintf("  best: %.0f%%", FinalResult.BestScore*100)))
+		items = append(items, accent.Render("  r → view evolved agent"))
 	} else {
 		gen := CurrentGeneration
 		total := m.iterations
@@ -408,6 +441,9 @@ func (m *ResultModel) viewSidePanel(w, h int) string {
 			bar := lg.NewStyle().Foreground(purple).Render(strings.Repeat("▓", filled)) +
 				dim.Render(strings.Repeat("░", barWidth-filled))
 			items = append(items, " "+bar)
+		}
+		if CurrentBestScore > 0 {
+			items = append(items, greenText.Render(fmt.Sprintf("  best so far: %.0f%%", CurrentBestScore*100)))
 		}
 	}
 	items = append(items, "")
@@ -488,7 +524,7 @@ func (m *ResultModel) viewDetail(w, h int) string {
 		return "No cell selected"
 	}
 
-	cell := m.cells[idx]
+	cell := &m.cells[idx]
 	name := cell.scenario
 	if name == "" {
 		name = fmt.Sprintf("Scenario %d", idx+1)
@@ -499,6 +535,7 @@ func (m *ResultModel) viewDetail(w, h int) string {
 		statusStr = spinner(m.tick)
 	}
 
+	// Header
 	headerText := fmt.Sprintf(" %s  %s ", name, statusStr)
 	padLen := w - len([]rune(headerText))
 	if padLen > 0 {
@@ -513,11 +550,51 @@ func (m *ResultModel) viewDetail(w, h int) string {
 		Foreground(headerColor).
 		Render(headerText)
 
-	raw := cell.content.String()
-	styled := m.styleDetailView(raw, w-4)
-	chat := m.scrollView(styled, h-2, &m.detailScroll)
+	// Tab bar — separated from header with label
+	numAgents := len(cell.agentIDs)
+	tabSection := ""
+	usedLines := 2
+	if numAgents > 1 {
+		tabLabel := dim.Render(" agents ")
+		var tabs string
+		for i := 0; i < numAgents; i++ {
+			label := fmt.Sprintf(" %d ", i+1)
+			if i == cell.activeTab {
+				tabs += lg.NewStyle().
+					Background(purple).
+					Foreground(lg.Color("#FFFFFF")).
+					Bold(true).
+					Render(label) + " "
+			} else {
+				tabs += lg.NewStyle().
+					Background(lg.Color("#222233")).
+					Foreground(softDim).
+					Render(label) + " "
+			}
+		}
+		tabs += dim.Render("←→")
+		tabSection = tabLabel + tabs
+		usedLines = 5
+	}
 
-	return header + "\n" + chat
+	// Get the active agent's conversation
+	var raw string
+	if numAgents > 0 && cell.activeTab < numAgents {
+		gid := cell.agentIDs[cell.activeTab]
+		if buf, ok := cell.agents[gid]; ok {
+			raw = buf.String()
+		}
+	} else {
+		raw = cell.content.String()
+	}
+
+	styled := m.styleDetailView(raw, w-4)
+	chat := m.scrollView(styled, h-usedLines, &m.detailScroll)
+
+	if tabSection != "" {
+		return header + "\n\n" + tabSection + "\n\n" + chat
+	}
+	return header + "\n\n" + chat
 }
 
 // ── Result view ─────────────────────────────────────────────────────────────
@@ -577,9 +654,28 @@ func (m *ResultModel) viewResult(w, h int) string {
 		totalEliminated += len(gen.Eliminated)
 	}
 	right.WriteString(amberText.Bold(true).Render(" Natural Selection") + "\n")
-	right.WriteString(fmt.Sprintf(" %s %d survived  %s %d eliminated\n\n",
+	right.WriteString(fmt.Sprintf(" %s %d survived  %s %d eliminated\n",
 		greenText.Render("▲"), totalSurvived,
 		dim.Render("▼"), totalEliminated))
+
+	// Diversity sparkline
+	if len(r.Generations) > 0 {
+		right.WriteString(dim.Render(" diversity: "))
+		for _, gen := range r.Generations {
+			d := gen.Diversity
+			if d > 0.4 {
+				right.WriteString(greenText.Render("█"))
+			} else if d > 0.2 {
+				right.WriteString(amberText.Render("▆"))
+			} else if d > 0.1 {
+				right.WriteString(amberText.Render("▃"))
+			} else {
+				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render("▁"))
+			}
+		}
+		right.WriteString("\n")
+	}
+	right.WriteString("\n")
 
 	tree := m.buildEvolutionTree(r, rightW-2)
 	right.WriteString(tree)
@@ -594,6 +690,7 @@ func (m *ResultModel) viewResult(w, h int) string {
 			}
 		}
 		if best != nil {
+			bestIdx, worstIdx := 0, 0
 			for i, score := range best.ScenarioScores {
 				name := fmt.Sprintf("S%d", i+1)
 				if i < len(r.ScenarioNames) && r.ScenarioNames[i] != "" {
@@ -610,10 +707,44 @@ func (m *ResultModel) viewResult(w, h int) string {
 				if filled > barLen {
 					filled = barLen
 				}
-				bar := lg.NewStyle().Foreground(purple).Render(strings.Repeat("█", filled)) +
+				// Color bars by performance
+				barColor := purple
+				if score >= 0.7 {
+					barColor = green
+				} else if score < 0.4 {
+					barColor = lg.Color("#FF5555")
+				}
+				bar := lg.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
 					dim.Render(strings.Repeat("░", barLen-filled))
 				right.WriteString(fmt.Sprintf(" %s %.0f%%\n", bar, score*100))
 				right.WriteString(softText.Render(fmt.Sprintf(" %s", name)) + "\n")
+
+				if score > best.ScenarioScores[bestIdx] {
+					bestIdx = i
+				}
+				if score < best.ScenarioScores[worstIdx] {
+					worstIdx = i
+				}
+			}
+			// Strength/weakness
+			if len(best.ScenarioScores) > 1 {
+				right.WriteString("\n")
+				bestName := "?"
+				worstName := "?"
+				if bestIdx < len(r.ScenarioNames) {
+					bestName = r.ScenarioNames[bestIdx]
+				}
+				if worstIdx < len(r.ScenarioNames) {
+					worstName = r.ScenarioNames[worstIdx]
+				}
+				if len(bestName) > rightW-14 {
+					bestName = bestName[:rightW-15] + "…"
+				}
+				if len(worstName) > rightW-14 {
+					worstName = worstName[:rightW-15] + "…"
+				}
+				right.WriteString(greenText.Render(" ✦ ") + softText.Render(bestName) + "\n")
+				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render(" ○ ") + softText.Render(worstName) + "\n")
 			}
 		}
 	}
@@ -796,38 +927,35 @@ func (m *ResultModel) buildDualChart(gens []GenerationStats, width int) string {
 // ── Cell content styling ────────────────────────────────────────────────────
 
 func (m *ResultModel) styleCellPreview(raw string, maxWidth, maxLines int) string {
-	lines := strings.Split(raw, "\n")
-	var styled []string
+	// Parse block markers and extract conversation snippets
+	blocks := strings.Split(raw, "<<<\n")
 
-	for _, line := range lines {
-		if len(line) == 0 {
+	var styled []string
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
 			continue
 		}
-		var rendered string
-		if line[0] == '>' {
-			content := line[1:]
-			if len(content) > maxWidth-2 {
-				content = content[:maxWidth-2] + "…"
+
+		if strings.HasPrefix(block, ">>>") {
+			content := strings.TrimPrefix(block, ">>>")
+			// Take first line of agent message
+			firstLine := strings.SplitN(strings.TrimSpace(content), "\n", 2)[0]
+			if len(firstLine) > maxWidth-2 {
+				firstLine = firstLine[:maxWidth-2] + "…"
 			}
-			rendered = lg.NewStyle().Foreground(purple).Render("▎") + " " + content
-		} else if line[0] == '<' {
-			content := line[1:]
-			if len(content) > maxWidth-2 {
-				content = content[:maxWidth-2] + "…"
+			styled = append(styled, lg.NewStyle().Foreground(purple).Render("▎")+" "+firstLine)
+		} else if strings.HasPrefix(block, "<<<") {
+			content := strings.TrimPrefix(block, "<<<")
+			parts := strings.SplitN(content, "\n", 2)
+			if len(parts) > 1 {
+				firstLine := strings.SplitN(strings.TrimSpace(parts[1]), "\n", 2)[0]
+				if len(firstLine) > maxWidth-2 {
+					firstLine = firstLine[:maxWidth-2] + "…"
+				}
+				styled = append(styled, softText.Render("  "+firstLine))
 			}
-			rendered = softText.Render("  " + content)
-		} else if line[0] == '~' {
-			// Agent separator
-			sep := strings.Repeat("·", maxWidth/2)
-			rendered = dim.Render(sep)
-		} else {
-			content := line
-			if len(content) > maxWidth {
-				content = content[:maxWidth-1] + "…"
-			}
-			rendered = dim.Render(content)
 		}
-		styled = append(styled, rendered)
 	}
 
 	if len(styled) > maxLines {
@@ -836,40 +964,60 @@ func (m *ResultModel) styleCellPreview(raw string, maxWidth, maxLines int) strin
 	return strings.Join(styled, "\n")
 }
 
-func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
-	lines := strings.Split(raw, "\n")
-	var result strings.Builder
 
-	for _, line := range lines {
-		if len(line) == 0 {
-			result.WriteString("\n")
+func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
+	// Parse block markers: >>>\n...\n<<< for agent, <<<Name\n...\n<<< for counterparty
+	var result strings.Builder
+	bar := lg.NewStyle().Foreground(purple).Render("  ┃ ")
+	agentLabel := lg.NewStyle().Foreground(purple).Bold(true).Render("  agent")
+
+	blocks := strings.Split(raw, "<<<\n")
+
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
 			continue
 		}
-		if line[0] == '>' {
-			content := line[1:]
-			bar := lg.NewStyle().Foreground(purple).Render("┃")
-			wrapped := m.wordWrap(" "+content, maxWidth-2)
+
+		if strings.HasPrefix(block, ">>>") {
+			// Agent message
+			content := strings.TrimPrefix(block, ">>>")
+			content = strings.TrimSpace(content)
+			result.WriteString("\n" + agentLabel + "\n")
+			wrapped := m.wordWrap(content, maxWidth-6)
 			for _, wl := range strings.Split(wrapped, "\n") {
 				if wl != "" {
 					result.WriteString(bar + wl + "\n")
 				}
 			}
-			result.WriteString("\n")
-		} else if line[0] == '<' {
-			content := line[1:]
-			wrapped := m.wordWrap("  "+content, maxWidth-2)
-			for _, wl := range strings.Split(wrapped, "\n") {
-				if wl != "" {
-					result.WriteString(cyanText.Render(wl) + "\n")
+		} else if strings.HasPrefix(block, "<<<") {
+			// Counterparty message — name is on the first line after <<<
+			content := strings.TrimPrefix(block, "<<<")
+			parts := strings.SplitN(content, "\n", 2)
+			name := strings.TrimSpace(parts[0])
+			body := ""
+			if len(parts) > 1 {
+				body = strings.TrimSpace(parts[1])
+			}
+			nameLabel := lg.NewStyle().Foreground(cyan).Bold(true).Render("  "+name) +
+				dim.Render(" (counterparty)")
+			result.WriteString("\n" + nameLabel + "\n")
+			if body != "" {
+				wrapped := m.wordWrap(body, maxWidth-6)
+				for _, wl := range strings.Split(wrapped, "\n") {
+					if wl != "" {
+						result.WriteString("    " + wl + "\n")
+					}
 				}
 			}
-			result.WriteString("\n")
-		} else if line[0] == '~' {
-			sep := dim.Render("  " + strings.Repeat("· ", maxWidth/4))
-			result.WriteString("\n" + sep + "\n\n")
 		} else {
-			wrapped := m.wordWrap(line, maxWidth)
-			result.WriteString(dim.Render(wrapped))
+			// System message (generation markers etc)
+			for _, line := range strings.Split(block, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					result.WriteString("\n" + dim.Render("  "+line) + "\n")
+				}
+			}
 		}
 	}
 	return result.String()

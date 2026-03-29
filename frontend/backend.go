@@ -31,6 +31,11 @@ type backendEvent struct {
 	ParentIDs      []string  `json:"parent_ids,omitempty"`
 	Survivors      []string  `json:"survivors,omitempty"`
 	Eliminated     []string  `json:"eliminated,omitempty"`
+	Operation      string    `json:"operation,omitempty"`
+	Child          string    `json:"child,omitempty"`
+	Parent         string    `json:"parent,omitempty"`
+	ParentA        string    `json:"parent_a,omitempty"`
+	ParentB        string    `json:"parent_b,omitempty"`
 	PopSize        int       `json:"population_size,omitempty"`
 	NumGens        int       `json:"num_generations,omitempty"`
 	NumScenarios   int       `json:"num_scenarios,omitempty"`
@@ -39,6 +44,7 @@ type backendEvent struct {
 
 var FinalResult *EvolutionResult
 var CurrentGeneration int
+var CurrentBestScore float64
 var ActivityLog []string
 
 func logActivity(msg string) {
@@ -134,9 +140,9 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 		scanner := bufio.NewScanner(stdout)
 		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-		// Track which group is currently being displayed per cell
-		// When a new group_id appears for a scenario, emit a separator
-		lastGroup := make(map[int]int) // scenario_id -> last group_id seen
+		// Track first group per cell for preview, store all for detail tabs
+		cellFirstGroup := make(map[int]int)
+		cellFirstSet := make(map[int]bool)
 
 		var genStats []GenerationStats
 		var finalScores []AgentScore
@@ -159,22 +165,26 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 				evGoal = event.Goal
 				popSize = event.PopSize
 				numGens = event.NumGens
-				logActivity("Generating scenarios...")
+				logActivity("LLM generating scenarios...")
 
 			case "scenario_ready":
 				scenarioNames = append(scenarioNames, event.Scenario)
-				logActivity(fmt.Sprintf("Scenario: %s", event.Scenario))
+				logActivity(fmt.Sprintf("+ %s", event.Scenario))
 
 			case "population_ready":
-				logActivity("Population seeded")
-				logActivity("Starting evolution...")
+				logActivity(fmt.Sprintf("%d diverse agents seeded", popSize))
+				logActivity("beginning evolution")
 
 			case "generation_start":
 				CurrentGeneration = event.Generation
 				currentGen = event.Generation
 				finalScores = nil
-				logActivity(fmt.Sprintf("── Gen %d ──", event.Generation))
-				logActivity("Running simulations...")
+				cellFirstSet = make(map[int]bool)
+				cellFirstGroup = make(map[int]int)
+				// Don't clear agents — conversations accumulate across gens.
+				// New group_ids from new agents will just create new tabs.
+				logActivity(fmt.Sprintf("── gen %d ──", event.Generation))
+				logActivity("all scenarios running in parallel")
 				for i := range cells {
 					header := fmt.Sprintf("\n── Generation %d ──\n\n", event.Generation)
 					select {
@@ -194,7 +204,7 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 				}
 
 			case "evaluation_start":
-				logActivity("Evaluating agents (3x)...")
+				logActivity("scoring transcripts (3x avg)")
 
 			case "message":
 				idx := event.ScenarioID
@@ -202,7 +212,21 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 					continue
 				}
 				// Clean up JSON-wrapped messages
+				// Track first group for preview
+				if !cellFirstSet[idx] {
+					cellFirstGroup[idx] = event.GroupID
+					cellFirstSet[idx] = true
+				}
+
+				// Register this group if new
+				if _, exists := cells[idx].agents[event.GroupID]; !exists {
+					b := &strings.Builder{}
+					cells[idx].agents[event.GroupID] = b
+					cells[idx].agentIDs = append(cells[idx].agentIDs, event.GroupID)
+				}
+
 				content := event.Content
+				// Clean up JSON-wrapped messages
 				if strings.HasPrefix(content, "{") {
 					var wrapper map[string]string
 					if err := json.Unmarshal([]byte(content), &wrapper); err == nil {
@@ -211,27 +235,31 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 						}
 					}
 				}
-
-				// Insert separator when switching to a different agent's conversation
-				prev, seen := lastGroup[idx]
-				if seen && prev != event.GroupID {
-					sep := "~\n" // parsed as separator in styling
-					select {
-					case cells[idx].conv.ch <- sep:
-					default:
-					}
+				// Flatten to single line — these are chat messages, not emails
+				content = strings.ReplaceAll(content, "\\n", " ")
+				content = strings.ReplaceAll(content, "\n", " ")
+				for strings.Contains(content, "  ") {
+					content = strings.ReplaceAll(content, "  ", " ")
 				}
-				lastGroup[idx] = event.GroupID
+				content = strings.TrimSpace(content)
 
+				// Use block markers: >>>\n...\n<<< for agent, <<<name\n...\n<<< for counterparty
 				var line string
 				if event.Role == "negotiator" {
-					line = fmt.Sprintf(">%s\n", content)
+					line = ">>>\n" + content + "\n<<<\n"
 				} else {
-					line = fmt.Sprintf("<%s: %s\n", event.Sender, content)
+					line = "<<<" + event.Sender + "\n" + content + "\n<<<\n"
 				}
-				select {
-				case cells[idx].conv.ch <- line:
-				default:
+
+				// Store in per-agent buffer
+				cells[idx].agents[event.GroupID].WriteString(line)
+
+				// Feed preview channel only for first agent
+				if event.GroupID == cellFirstGroup[idx] {
+					select {
+					case cells[idx].conv.ch <- line:
+					default:
+					}
 				}
 
 			case "score":
@@ -253,8 +281,17 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 			case "selection":
 				currentSurvivors = event.Survivors
 				currentEliminated = event.Eliminated
-				logActivity(fmt.Sprintf("  %d survived, %d eliminated", len(event.Survivors), len(event.Eliminated)))
-				logActivity("Mutating & crossing over...")
+				logActivity(fmt.Sprintf("  %d kept, %d replaced", len(event.Survivors), len(event.Eliminated)))
+
+			case "breed":
+				switch event.Operation {
+				case "mutate":
+					logActivity(fmt.Sprintf("  %s ← mutate(%s)", event.Child, event.Parent))
+				case "crossover":
+					logActivity(fmt.Sprintf("  %s ← cross(%s, %s)", event.Child, event.ParentA, event.ParentB))
+				case "clone":
+					logActivity(fmt.Sprintf("  %s ← clone(%s)", event.Child, event.Parent))
+				}
 
 			case "generation_complete":
 				genStats = append(genStats, GenerationStats{
@@ -266,7 +303,8 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 				})
 				currentSurvivors = nil
 				currentEliminated = nil
-				logActivity(fmt.Sprintf("Gen %d done · best: %.0f%%", event.Generation, event.BestScore*100))
+				CurrentBestScore = event.BestScore
+				logActivity(fmt.Sprintf("gen %d best: %.0f%%", event.Generation, event.BestScore*100))
 				for i := range cells {
 					divider := fmt.Sprintf("\n══ Gen %d done · best: %.0f%% ══\n\n",
 						event.Generation, event.BestScore*100)
