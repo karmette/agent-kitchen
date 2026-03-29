@@ -82,7 +82,6 @@ Each scenario automatically picks the right OASIS primitives:
 - **Social mode** — public posts/comments/likes for marketing, debate, outreach
 - **Mixed mode** — both private and public interaction in one scenario
 
-
 ---
 
 ## The Genome
@@ -194,7 +193,6 @@ go build -o agent-kitchen
 ```
 
 ---
-
 
 
 *AI slop implies the existence of AI peak*

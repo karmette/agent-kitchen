@@ -50,65 +50,79 @@ Generate {num_scenarios} DIVERSE scenarios that test DIFFERENT aspects of \
 this skill. Each scenario should be a distinct situation with different \
 dynamics, stakes, and counterparty types.
 
-Examples by goal type:
-- "best negotiator" → salary negotiation, vendor contract, used car haggling
-- "best marketing agent" → pitching to skeptics, engaging on social media, cold outreach
-- "best interviewer" → technical interview panel, behavioral screening, culture fit
-- "best customer service agent" → angry customer, refund request, technical support
-- "best teacher" → explaining to a beginner, helping a struggling student, advanced Q&A
-- "best salesperson" → cold pitch, handling objections, closing a warm lead
-- "best mediator" → workplace conflict, neighbor dispute, contract disagreement
+## Scenario Modes
 
-Each scenario must be CONCRETE — specific stakes, specific context, not \
-vague. Each scenario independently defines its own topology and counterparties.
+Each scenario has a "mode" that determines how agents interact:
 
-Choose the right topology for each scenario:
-- 1v1 conversations (sales, negotiation, support) → pairwise
-- Panel interactions (interviews, pitches to a committee) → rooms with multiple counterparties
-- Group dynamics (team mediation, classroom) → rooms with multiple counterparties
+**"group"** — Private group chat. Agents send messages in a chat room. \
+Use for: negotiations, interviews, mediation, tutoring, support chats.
 
-CRITICAL RULES FOR THE TEMPLATE:
-- The template is shared by ALL agents (both the evolved agent and counterparties).
-- The template must NEVER say "you are the buyer" or "you are the seller" — each \
-  agent's role is defined entirely by their persona field.
-- The template should set the SCENE (what situation this is, what's at stake) but \
-  leave the agent's specific role to {{persona}}.
+**"social"** — Public social media. Agents create posts, comment on posts, \
+like/dislike, follow each other. Use for: marketing, public debate, \
+customer outreach, brand building, community engagement.
+
+**"mixed"** — Both private chat AND public social media in the same scenario. \
+Use for: scenarios that need both private negotiation and public presence.
+
+Pick the mode that best fits each scenario. For diverse testing, try to use \
+at least one "social" scenario if the goal involves any public-facing skill.
+
+## Examples by goal type
+- "best negotiator" → group: salary negotiation, group: vendor contract, group: used car haggling
+- "best marketing agent" → social: product launch on Reddit, social: engaging skeptics, group: pitch meeting
+- "best customer service agent" → social: handling complaint posts, group: support chat, mixed: escalation
+- "best teacher" → group: tutoring session, social: answering questions on a forum
+- "best salesperson" → group: closing a deal, social: cold outreach via posts
+- "best mediator" → group: workplace conflict, group: neighbor dispute
+
+## Template Rules
+- The template is shared by ALL agents (evolved agent + counterparties).
+- NEVER assign a specific role in the template — roles come from {{persona}}.
+- The template sets the SCENE, {{persona}} defines each agent's role.
 - The template MUST contain {{persona}} exactly once.
-- The template MUST end with: "IMPORTANT: Keep every message to 1-3 sentences. No \
-  essays, no bullet points, no markdown. Talk naturally like a person in a live chat."
+- For group mode, end with: "IMPORTANT: Keep every message to 1-3 sentences. \
+  Talk naturally like a person in a live chat."
+- For social mode, end with: "IMPORTANT: Be concise. Write like a real person \
+  on social media — short posts, natural comments."
+
+## Return Format
 
 Return ONLY valid JSON — an array of scenario objects:
 [
   {{
-    "_scenario": "one-line description (e.g. 'Salary negotiation for a senior engineer role')",
-    "template": "You are in a live chat about [neutral scene description — what's happening, what's at stake, WITHOUT assigning a role]. Your role and goals: {{persona}} IMPORTANT: Keep every message to 1-3 sentences. No essays, no bullet points, no markdown. Talk naturally like a person in a live chat.",
-    "topology": <topology object>,
-    "actions": ["SEND_TO_GROUP"],
+    "_scenario": "one-line description",
+    "mode": "group" or "social" or "mixed",
+    "template": "...(must contain {{persona}})...",
+    "topology": <topology object, required for group/mixed, omit for social>,
     "num_rounds": 5,
+    "seed_posts": ["optional initial posts for social/mixed mode"],
     "counterparties": [
       {{
         "username": "short_snake_case",
         "name": "Full Name",
-        "bio": "One-line role (e.g. 'Used car seller')",
-        "persona": "MUST start with the agent's specific role (e.g. 'You are the seller of a 2019 Honda Civic...'). Then: what they want, how they behave, their limits. 3-5 sentences."
+        "bio": "One-line role",
+        "persona": "MUST start with the agent's specific role. Then: what they want, how they behave, their limits. 3-5 sentences."
       }}
     ]
   }}
 ]
 
-Topology JSON options:
+## Topology (group and mixed modes only)
 - 1v1: {{"mode": "pairwise"}}
 - Panel/group: {{"mode": "rooms", "per": "negotiator", "members": ["negotiator", "all_counterparties"]}}
-
 The "per" field MUST be "negotiator" or "counterparty".
-The "members" MUST be a list from: "negotiator", "counterparty", "all_negotiators", "all_counterparties".
+The "members" MUST be from: "negotiator", "counterparty", "all_negotiators", "all_counterparties".
 
-Keep all scenarios realistic — everyday business, workplace, or consumer \
-situations. Each scenario should have 1-2 counterparties for speed.
+## Seed Posts (social and mixed modes only)
+Optional array of initial post content that counterparties will publish \
+before the evolved agents act. Use to set the scene — e.g., a complaint \
+post, a product announcement, a controversial opinion.
+
+Keep all scenarios realistic. Each should have 1-2 counterparties for speed.
 
 IMPORTANT: Every scenario MUST be fundamentally different — different \
-settings, different relationship dynamics, different stakes. Each should test a genuinely \
-distinct skill.
+settings, different relationship dynamics, different stakes. Each should \
+test a genuinely distinct skill.
 """
 
 RUBRIC_GENERATION_PROMPT = """\
@@ -161,40 +175,58 @@ Return ONLY valid JSON:
 
 # ── Validation ───────────────────────────────────────────────────────────────
 
+VALID_SCENARIO_MODES = {"group", "social", "mixed"}
+
+
 def validate_scenario(scenario: dict) -> list[str]:
     errors = []
+    scenario_mode = scenario.get("mode", "group")
+
+    if scenario_mode not in VALID_SCENARIO_MODES:
+        errors.append(f"Invalid scenario mode: {scenario_mode}")
+
     if "template" not in scenario:
         errors.append("Missing 'template'")
     elif "{persona}" not in scenario.get("template", ""):
         errors.append("Template must contain {persona}")
 
-    if "counterparties" not in scenario:
-        errors.append("Missing 'counterparties'")
-    elif not isinstance(scenario["counterparties"], list) or len(scenario["counterparties"]) == 0:
-        errors.append("'counterparties' must be a non-empty list")
-    else:
-        for i, cp in enumerate(scenario["counterparties"]):
-            for field in ("username", "name", "bio", "persona"):
-                if field not in cp or not isinstance(cp[field], str):
-                    errors.append(f"Counterparty {i} missing '{field}'")
-
-    topology = scenario.get("topology", {})
-    mode = topology.get("mode")
-    if mode not in VALID_TOPOLOGY_MODES:
-        errors.append(f"Invalid topology mode: {mode}")
-    if mode == "rooms":
-        if topology.get("per") not in VALID_PER_VALUES:
-            errors.append(f"Invalid 'per': {topology.get('per')}")
-        members = topology.get("members", [])
-        if not isinstance(members, list):
-            errors.append("'members' must be a list")
+    # Counterparties are optional for social mode but required otherwise
+    if "counterparties" in scenario:
+        if not isinstance(scenario["counterparties"], list):
+            errors.append("'counterparties' must be a list")
         else:
-            for m in members:
-                if m not in VALID_MEMBER_TYPES:
-                    errors.append(f"Invalid member: {m}")
+            for i, cp in enumerate(scenario["counterparties"]):
+                for field in ("username", "name", "bio", "persona"):
+                    if field not in cp or not isinstance(cp[field], str):
+                        errors.append(f"Counterparty {i} missing '{field}'")
+    elif scenario_mode in ("group", "mixed"):
+        errors.append("'counterparties' required for group/mixed mode")
+
+    # Topology required for group/mixed, ignored for social
+    if scenario_mode in ("group", "mixed"):
+        topology = scenario.get("topology", {})
+        topo_mode = topology.get("mode")
+        if topo_mode not in VALID_TOPOLOGY_MODES:
+            errors.append(f"Invalid topology mode: {topo_mode}")
+        if topo_mode == "rooms":
+            if topology.get("per") not in VALID_PER_VALUES:
+                errors.append(f"Invalid 'per': {topology.get('per')}")
+            members = topology.get("members", [])
+            if not isinstance(members, list):
+                errors.append("'members' must be a list")
+            else:
+                for m in members:
+                    if m not in VALID_MEMBER_TYPES:
+                        errors.append(f"Invalid member: {m}")
 
     if not isinstance(scenario.get("num_rounds", 0), int) or scenario.get("num_rounds", 0) < 1:
         errors.append("'num_rounds' must be a positive integer")
+
+    # Validate seed_posts if present
+    seed_posts = scenario.get("seed_posts", [])
+    if not isinstance(seed_posts, list):
+        errors.append("'seed_posts' must be a list")
+
     return errors
 
 
@@ -296,11 +328,15 @@ class Orchestrator:
             scenarios = await self._generate_scenarios()
             self._save_json(scenarios, "scenarios.json")
             for i, s in enumerate(scenarios):
+                scenario_mode = s.get("mode", "group")
+                topo_mode = s.get("topology", {}).get("mode", "none")
+                num_cp = len(s.get("counterparties", []))
                 emit({"type": "scenario_ready", "scenario_id": i,
                       "scenario": s.get("_scenario", ""),
-                      "topology": s["topology"]["mode"],
-                      "num_counterparties": len(s["counterparties"])})
-                log(f"      [{i+1}] {s.get('_scenario', '?')} ({s['topology']['mode']}, {len(s['counterparties'])} counterparties)")
+                      "mode": scenario_mode,
+                      "topology": topo_mode,
+                      "num_counterparties": num_cp})
+                log(f"      [{i+1}] {s.get('_scenario', '?')} ({scenario_mode}/{topo_mode}, {num_cp} counterparties)")
 
             # Step 2: Generate rubric
             if not self.rubric:
@@ -350,9 +386,10 @@ class Orchestrator:
                 os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
                 emit({"type": "scenario_start", "generation": gen,
-                      "scenario_id": scenario_idx, "scenario": scenario_name})
+                      "scenario_id": scenario_idx, "scenario": scenario_name,
+                      "mode": scenario.get("mode", "group")})
 
-                db_path, agents_spec = await run_scenario(
+                db_path, agents_spec, scenario_mode = await run_scenario(
                     scenario_path, db_path, generation=gen, scenario_id=scenario_idx)
 
                 emit({"type": "evaluation_start", "generation": gen,
@@ -360,7 +397,7 @@ class Orchestrator:
                 log(f"    Evaluating scenario {scenario_idx}...")
                 scores = await evaluate_generation(
                     db_path=db_path, agents_spec=agents_spec,
-                    rubric=self.rubric, model=self.model)
+                    rubric=self.rubric, model=self.model, mode=scenario_mode)
 
                 return scenario_idx, scores
 

@@ -1,15 +1,11 @@
-"""Custom SocialAgent subclass for focused group chat conversations.
+"""Custom SocialAgent subclasses for focused interactions.
 
-OASIS's default `perform_action_by_llm` sends a confusing "social media"
-prompt that includes posts, followers, and "pick one you want to perform
-action" instructions. This is designed for Reddit/Twitter simulation,
-not structured group chat.
+OASIS's default perform_action_by_llm sends a "social media" prompt
+that's too generic for our use case. These overrides give clean,
+focused prompts:
 
-ChatSocialAgent overrides that method to:
-1. Only show group messages (no posts/followers noise)
-2. Always send a message (no wasted listen/do-nothing turns)
-3. Frame the interaction as a conversation, not social media
-4. Tell the LLM the exact group_id so it doesn't guess
+- GroupChatAgent: for private group chat (negotiation, interview, etc.)
+- SocialMediaAgent: for public posts/comments (marketing, debate, etc.)
 """
 
 import sqlite3
@@ -17,32 +13,23 @@ import logging
 import sys
 
 from camel.messages import BaseMessage
-
 from oasis.social_agent.agent import SocialAgent
 
 if "sphinx" not in sys.modules:
     agent_log = logging.getLogger(name="social.agent")
 
 
-class ChatSocialAgent(SocialAgent):
-    """SocialAgent that focuses purely on group chat conversation.
-
-    Set `self.db_path` after construction (before simulation starts).
-    """
+class GroupChatAgent(SocialAgent):
+    """SocialAgent with a conversation-focused prompt for group chat."""
 
     db_path: str = None
 
     async def perform_action_by_llm(self):
-        """Override: build a conversation-focused prompt instead of
-        OASIS's default social-media prompt."""
-
         agent_id = self.social_agent_id
         db_path = self.db_path
         if not db_path:
-            agent_log.error(f"Agent {agent_id}: no db_path set")
             return await super().perform_action_by_llm()
 
-        # Read conversation history and find our group
         conversation_lines = []
         group_id = None
         my_name = None
@@ -51,13 +38,11 @@ class ChatSocialAgent(SocialAgent):
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
 
-            # Get our name
             me = conn.execute(
                 "SELECT name FROM user WHERE agent_id = ?", (agent_id,)
             ).fetchone()
             my_name = me["name"] if me else f"Agent {agent_id}"
 
-            # Find which group this agent is in
             groups = conn.execute(
                 "SELECT group_id FROM group_members WHERE agent_id = ?",
                 (agent_id,),
@@ -85,50 +70,165 @@ class ChatSocialAgent(SocialAgent):
         except Exception as e:
             agent_log.error(f"Agent {agent_id} DB read error: {e}")
 
-        # Build the prompt
         if conversation_lines:
             chat_history = "\n".join(conversation_lines)
             prompt = (
-                f"Here is the conversation so far:\n\n"
-                f"{chat_history}\n\n"
-                f"It's your turn to speak as {my_name}. "
-                f"Reply to what the other person just said. "
-                f"Do NOT repeat anything you've already said. "
-                f"Advance the conversation.\n\n"
-                f"Call send_to_group with group_id={group_id} and your message."
+                f"Conversation so far:\n\n{chat_history}\n\n"
+                f"You are {my_name}. Respond naturally to advance the conversation. "
+                f"Do not repeat anything already said.\n\n"
+                f"You MUST respond by calling exactly one function:\n"
+                f"- send_to_group(group_id={group_id}, message=\"your reply\")\n"
+                f"- do_nothing() if the conversation is over\n\n"
+                f"Do NOT write a message as text. You MUST use a function call."
             )
         else:
             prompt = (
-                f"You are {my_name}. The conversation is just starting. "
-                f"Open with a natural first message — introduce yourself "
-                f"and get the discussion going.\n\n"
-                f"Call send_to_group with group_id={group_id} and your message."
+                f"You are {my_name}. Start the conversation with a natural opening.\n\n"
+                f"You MUST respond by calling: send_to_group(group_id={group_id}, message=\"your message\")\n"
+                f"Do NOT write a message as text. You MUST use a function call."
             )
 
         user_msg = BaseMessage.make_user_message(
             role_name="User", content=prompt)
 
         try:
-            agent_log.info(
-                f"Agent {agent_id} chat prompt: {prompt[:300]}...")
             response = await self.astep(user_msg)
 
             if response.info.get("tool_calls"):
-                for tool_call in response.info["tool_calls"]:
-                    agent_log.info(
-                        f"Agent {agent_id} action: {tool_call.tool_name} "
-                        f"args: {tool_call.args}")
                 return response
 
-            # If the LLM responded with text instead of a tool call,
-            # force it into send_to_group
             text = response.msg.content if response.msg else ""
             if text and group_id is not None:
-                # Strip wrapping quotes the LLM sometimes adds
+                # LLM didn't use a function call — extract just the message
                 text = text.strip().strip('"').strip("'")
-                agent_log.info(
-                    f"Agent {agent_id} text fallback -> send_to_group({group_id})")
-                await self.env.action.send_to_group(group_id, text)
+                # Discard if it contains prompt echoing
+                if "function call" not in text.lower() and "send_to_group" not in text:
+                    if len(text) > 10:
+                        await self.env.action.send_to_group(group_id, text)
+
+            return response
+
+        except Exception as e:
+            agent_log.error(f"Agent {agent_id} error: {e}")
+            return e
+
+
+class SocialMediaAgent(SocialAgent):
+    """SocialAgent with a focused prompt for public social media interaction."""
+
+    db_path: str = None
+
+    async def perform_action_by_llm(self):
+        agent_id = self.social_agent_id
+        db_path = self.db_path
+        if not db_path:
+            return await super().perform_action_by_llm()
+
+        my_name = None
+        posts = []
+        my_posts = []
+
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+
+            # My name
+            me = conn.execute(
+                "SELECT name FROM user WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            my_name = me["name"] if me else f"Agent {agent_id}"
+
+            # My user_id
+            me_user = conn.execute(
+                "SELECT user_id FROM user WHERE agent_id = ?", (agent_id,)
+            ).fetchone()
+            my_user_id = me_user["user_id"] if me_user else -1
+
+            # All posts with author names
+            for p in conn.execute(
+                "SELECT p.post_id, p.user_id, p.content, p.num_likes, p.num_dislikes, "
+                "u.name as author_name "
+                "FROM post p JOIN user u ON p.user_id = u.user_id "
+                "ORDER BY p.created_at"
+            ).fetchall():
+                post_info = {
+                    "id": p["post_id"],
+                    "author": p["author_name"],
+                    "content": p["content"] or "",
+                    "likes": p["num_likes"],
+                    "dislikes": p["num_dislikes"],
+                    "is_mine": p["user_id"] == my_user_id,
+                    "comments": [],
+                }
+                # Comments on this post
+                for c in conn.execute(
+                    "SELECT c.user_id, c.content, u.name as author_name "
+                    "FROM comment c JOIN user u ON c.user_id = u.user_id "
+                    "WHERE c.post_id = ? ORDER BY c.created_at",
+                    (p["post_id"],)
+                ).fetchall():
+                    post_info["comments"].append({
+                        "author": c["author_name"],
+                        "content": c["content"] or "",
+                        "is_mine": c["user_id"] == my_user_id,
+                    })
+                posts.append(post_info)
+                if post_info["is_mine"]:
+                    my_posts.append(post_info)
+
+            conn.close()
+        except Exception as e:
+            agent_log.error(f"Agent {agent_id} DB read error: {e}")
+
+        # Build a readable feed
+        feed_lines = []
+        for p in posts:
+            mine_tag = " (you)" if p["is_mine"] else ""
+            feed_lines.append(
+                f"POST by {p['author']}{mine_tag}: {p['content']}"
+                f" [{p['likes']} likes, {p['dislikes']} dislikes]"
+            )
+            for c in p["comments"]:
+                c_tag = " (you)" if c["is_mine"] else ""
+                feed_lines.append(f"  REPLY by {c['author']}{c_tag}: {c['content']}")
+
+        feed = "\n".join(feed_lines) if feed_lines else "(no posts yet)"
+
+        # Count what I've done
+        my_post_count = len(my_posts)
+        my_comment_count = sum(
+            1 for p in posts for c in p["comments"] if c["is_mine"]
+        )
+
+        prompt = (
+            f"You are {my_name} on a social media platform.\n\n"
+            f"Current feed:\n\n{feed}\n\n"
+            f"Your activity so far: {my_post_count} posts, {my_comment_count} comments.\n\n"
+            f"You MUST respond by calling exactly one function:\n"
+            f"- create_post(content=\"...\") — write a new post\n"
+            f"- create_comment(post_id=N, content=\"...\") — reply to a post\n"
+            f"- like_post(post_id=N) — like a post\n"
+            f"- do_nothing() — if you have nothing to add\n\n"
+            f"Be original. Don't repeat what's already been said. "
+            f"Do NOT write a message as text. You MUST use a function call."
+        )
+
+        user_msg = BaseMessage.make_user_message(
+            role_name="User", content=prompt)
+
+        try:
+            response = await self.astep(user_msg)
+
+            if response.info.get("tool_calls"):
+                return response
+
+            # Fallback: LLM didn't use a function call
+            text = response.msg.content if response.msg else ""
+            if text:
+                text = text.strip().strip('"').strip("'")
+                if "function call" not in text.lower() and "create_post" not in text:
+                    if len(text) > 10:
+                        await self.env.action.create_post(text)
 
             return response
 
