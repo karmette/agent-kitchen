@@ -1,6 +1,6 @@
 <div align="center">
   <img width="2672" height="1522" alt="Screenshot 2026-03-29 at 1 12 40 PM" src="https://github.com/user-attachments/assets/4385729e-3158-49b5-af4c-dd5fba095a87" />
-  <h1>Haggle</h1>
+  <h1>Agent Kitchen</h1>
 </div>
 
 **Replace prompt engineering with evolution.**
