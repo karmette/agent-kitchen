@@ -89,10 +89,12 @@ async def run_scenario(scenario_path: str, db_path: str = None,
     )
 
     # Pick agent class based on mode
-    if mode == "social":
-        AgentClass = SocialMediaAgent
-    else:
+    if mode == "group":
         AgentClass = GroupChatAgent
+    elif mode == "social":
+        AgentClass = SocialMediaAgent
+    else:  # mixed — native SocialAgent can handle both groups and posts
+        AgentClass = SocialAgent
 
     agent_graph = AgentGraph()
     for agent_id, profile, is_negotiator, source_idx in agents_spec:
