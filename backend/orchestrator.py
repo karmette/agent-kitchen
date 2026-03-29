@@ -61,8 +61,7 @@ Use for: negotiations, interviews, mediation, tutoring, support chats.
 like/dislike, follow each other. Use for: marketing, public debate, \
 customer outreach, brand building, community engagement.
 
-**"mixed"** — Both private chat AND public social media in the same scenario. \
-Use for: scenarios that need both private negotiation and public presence.
+Pick either "group" or "social" for each scenario — not both.
 
 Pick the mode that best fits each scenario. For diverse testing, try to use \
 at least one "social" scenario if the goal involves any public-facing skill.
@@ -91,7 +90,7 @@ Return ONLY valid JSON — an array of scenario objects:
 [
   {{
     "_scenario": "one-line description",
-    "mode": "group" or "social" or "mixed",
+    "mode": "group" or "social",
     "template": "...(must contain {{persona}})...",
     "topology": <topology object, required for group/mixed, omit for social>,
     "num_rounds": 5,
@@ -523,6 +522,10 @@ class Orchestrator:
                     all_valid = False
 
             if all_valid and len(scenarios) >= 1:
+                # Clamp rounds to keep simulations fast
+                for s in scenarios:
+                    if s.get("num_rounds", 5) > 5:
+                        s["num_rounds"] = 5
                 return scenarios[:self.num_scenarios]
 
             prompt = SCENARIOS_GENERATION_PROMPT.format(

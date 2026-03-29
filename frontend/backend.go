@@ -132,7 +132,7 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 		defer logFile.Close()
 
 		backendDir := filepath.Join("..", "backend")
-		pythonPath := filepath.Join(backendDir, ".venv", "bin", "python")
+		pythonPath := filepath.Join(backendDir, "..", ".venv", "bin", "python")
 		pythonPath, err = filepath.Abs(pythonPath)
 		if err != nil {
 			return

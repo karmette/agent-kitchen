@@ -1,197 +1,93 @@
-# Agent Kitchen
+<div align="center">
+  <img width="2672" height="1522" alt="Screenshot 2026-03-29 at 1 12 40 PM" src="https://github.com/user-attachments/assets/4385729e-3158-49b5-af4c-dd5fba095a87" />
+  <h1>Haggle</h1>
+</div>
 
 **Replace prompt engineering with evolution.**
 
-Agent Kitchen evolves the best AI agent for any social interaction by running natural selection inside [OASIS](https://github.com/camel-ai/oasis) social simulations. Describe the agent you want — "best negotiator", "best teacher", "best marketer" — and the system breeds a population of competing agents across diverse scenarios until the fittest prompt emerges.
-
----
-
-## Quick Start
-
-### Prerequisites
-- Python 3.11+
-- Go 1.21+
-- An OpenAI-compatible API key
-
-### Setup
-```bash
-# Clone
-git clone https://github.com/karmette/agent-kitchen.git
-cd agent-kitchen
-
-# Backend
-cd backend
-uv sync --no-dev
-
-# Configure API
-cp backend/.env.example backend/.env
-# Edit backend/.env with your API key
-
-# Frontend
-cd ../frontend
-go build -o agent-kitchen
-
-# Run
-./agent-kitchen
-```
+Describe the agent you want. A population of competing AI agents is dropped into [OASIS](https://github.com/camel-ai/oasis) social simulations — negotiating deals, posting on feeds, responding to crises. An LLM judge scores them. The weak die. The survivors mutate. The best prompt emerges, battle-tested and never written by a human.
 
 ---
 
 ## How It Works
 
-```
-You: "best negotiator"
-         |
-         v
-  +-----------------+
-  | Scenario Gen    |  AI creates diverse test scenarios:
-  |                 |  salary negotiation, vendor contract,
-  |                 |  used car haggling, public outreach...
-  +-----------------+
-         |
-         v
-  +-----------------+
-  | Population Seed |  4 agents with different strategies
-  |                 |  are generated as starting genomes
-  +-----------------+
-         |
-    +----+----+  <-- repeat for N generations
-    |         |
-    v         |
-  +-----------------+
-  | Simulate        |  Every agent runs through every scenario
-  |                 |  inside OASIS social simulations — live
-  |                 |  conversations, posts, comments, follows
-  +-----------------+
-    |
-    v
-  +-----------------+
-  | Score           |  LLM judge evaluates each agent's
-  |                 |  transcripts against a rubric
-  +-----------------+
-    |
-    v
-  +-----------------+
-  | Select          |  Top performers survive.
-  |                 |  Weak agents are eliminated.
-  +-----------------+
-    |
-    v
-  +-----------------+
-  | Breed           |  Survivors are mutated and crossed over
-  |                 |  to produce the next generation
-  +-----------------+
-    |         |
-    +---------+
-         |
-         v
-  +-----------------+
-  | Result          |  The best-performing agent's prompt
-  |                 |  is the output — evolved, not written
-  +-----------------+
-```
+> `"best negotiator"` → scenarios generated → agents spawned → simulations run → scored → weakest die → survivors mutate → repeat → **evolved prompt out**
+
+The system auto-generates diverse scenarios (salary negotiation, vendor contract, public outreach on social media). A population of agents with different strategies competes across all of them inside live OASIS simulations. An LLM judge evaluates every interaction against a rubric. Bottom performers are eliminated. Survivors are mutated and crossed over to produce the next generation. After N cycles, the fittest agent's prompt is the output.
 
 ---
 
 ## Why OASIS
 
-[OASIS](https://github.com/camel-ai/oasis) is a social media simulator from CAMEL-AI that can realistically model up to one million users on platforms like Reddit and Twitter. Agent Kitchen leverages OASIS as the **fitness testing environment** — the arena where agents prove themselves.
+Most agent benchmarks test if an AI can generate good text. That's not enough. [OASIS](https://github.com/camel-ai/oasis) is a social simulation platform from CAMEL-AI that models realistic multi-agent environments at scale. Agent Kitchen uses it as the **fitness arena** — the world where agents prove themselves.
 
-OASIS gives us capabilities no simple chat API can:
-
-| OASIS Feature | How Agent Kitchen Uses It |
+| What OASIS Provides | What It Enables |
 |---|---|
-| **Group Messaging** | Private 1-on-1 negotiations, interviews, mediation sessions |
-| **Posts & Comments** | Public-facing scenarios — marketing, debate, customer outreach |
-| **Social Graph** (follow/mute) | Measures whether an agent builds influence, not just talks well |
-| **Recommendation System** | Tests if an agent's content surfaces naturally in feeds |
-| **Multi-Agent Environments** | Panel interviews, group mediations, multi-party negotiations |
-| **Turn-Based & Simultaneous** | Private chats use turn-taking; social feeds let everyone act at once |
+| **Group Messaging** | Private negotiations, interviews, mediation |
+| **Posts & Comments** | Public-facing marketing, debate, customer outreach |
+| **Social Graph** | Measures if an agent builds real influence, not just talks well |
+| **Recommendation System** | Tests if content surfaces naturally in feeds |
+| **Multi-Agent Environments** | Panel interviews, group mediations, multi-party deals |
 
-Each scenario automatically picks the right OASIS primitives:
-- **Group mode** — private chat rooms for negotiations, interviews, tutoring
-- **Social mode** — public posts/comments/likes for marketing, debate, outreach
-- **Mixed mode** — both private and public interaction in one scenario
+A simple LLM wrapper tests what an agent *says*. OASIS tests what an agent *does* — whether it builds influence, handles backlash, negotiates under pressure, and adapts when others push back.
 
 ---
 
 ## The Genome
 
-Each agent is represented as a structured genome with six evolvable sections:
+Each agent is a structured prompt with six independently evolvable sections:
 
-| Section | Biological Analogy | What It Controls |
+| Section | Analogy | Role |
 |---|---|---|
-| **Role** | Body plan | Foundational identity — evolves slowly |
-| **Goals** | Drive function | What the agent optimizes for |
-| **Strategy** | Behavioral phenotype | High-level approach |
-| **Tactics** | Specific adaptations | Concrete techniques |
-| **Style** | Signaling | Communication tone and personality |
-| **Constraints** | Immune system | Hard boundaries it won't cross |
+| **Role** | Body plan | Core identity — evolves slowly |
+| **Goals** | Drive | What the agent optimizes for |
+| **Strategy** | Phenotype | High-level approach |
+| **Tactics** | Adaptations | Concrete techniques |
+| **Style** | Signaling | Tone and personality |
+| **Constraints** | Immune system | Hard boundaries |
 
-Evolution operators mirror real genetics:
-- **Point mutation** (50%) — small tweak to one section
-- **Rewrite** (20%) — larger rewrite of one section
-- **Insertion** (10%) — add a new element to a section
-- **Deletion** (10%) — remove a redundant element
-- **Crossover** (10%) — combine sections from two parents
-
-Section volatility mirrors biological evolution rates — tactics and style evolve fast, role and constraints evolve slowly.
+Mutation operators mirror real genetics: point mutations (50%), rewrites (20%), insertions (10%), deletions (10%), and crossover (10%). Tactics and style evolve fast. Role and constraints evolve slowly — just like biology. This means evolution explores the strategy space efficiently instead of randomly rewriting entire prompts.
 
 ---
 
 ## The TUI
 
-Agent Kitchen ships as a terminal application with a real-time dashboard built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss).
+Evolution is a black box if you can't watch it happen. The terminal dashboard (built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) + [Lip Gloss](https://github.com/charmbracelet/lipgloss)) streams everything in real time:
 
-### Input Screen
-- Describe your goal in natural language
-- Optionally define a custom scoring rubric with weighted criteria
-- Set generations and scenario count
+- **Input** — describe your goal, optionally define a custom rubric, set generations and scenarios
+- **Grid View** — each cell is a scenario running in parallel with live agent conversations
+- **Detail View** — expand any cell, tab between agents to compare how each one handles the same situation
+- **Results** — fitness charts, ranked leaderboard with per-scenario breakdowns, the full evolved prompt, and one-key export
 
-### Grid View
-- Each cell is a different test scenario running in parallel
-- Live-streaming conversations and social activity as agents interact
-- Sidebar shows current evolution phase, progress, and activity log
-- Expand any cell to watch individual agent interactions
-
-### Detail View
-- Tabs for each evolved agent being tested in that scenario
-- Feed tab for social media activity (posts, comments, follows)
-- Generation markers show which interactions belong to which evolution cycle
-
-### Results View
-- Fitness chart showing best and average scores over generations
-- Generation timeline with diversity indicators
-- Final leaderboard with per-scenario score breakdowns
-- Full evolved agent prompt with section highlighting
-- Evaluation rubric used for scoring
-- One-key export to markdown
+The sidebar explains what's happening at every phase: generating scenarios, simulating interactions, scoring agents, natural selection, breeding the next generation.
 
 ---
 
 ## Architecture
 
-```
-frontend/                 Go + Bubble Tea TUI
-  input.go               Goal, rubric, and settings input
-  result.go              Grid, detail, and results views
-  backend.go             Subprocess manager + JSONL event routing
+**Frontend:** Go + Bubble Tea TUI. Reads JSONL events from the backend via a pipe and renders them in real time.
 
-backend/                  Python + OASIS
-  orchestrator.py         Evolution loop — scenario gen, population, selection, breeding
-  main.py                 OASIS simulation runner — mode-aware (group/social/mixed)
-  chat_agent.py           Custom SocialAgent subclasses for focused prompts
-  genome.py               AgentGenome dataclass with 6 evolvable sections
-  mutator.py              Mutation operators modeled on biological genetics
-  topology.py             Flexible group topology builder (pairwise/rooms/custom)
-  events.py               JSONL event streaming + DB activity polling
-  llm.py                  Shared LLM client with SSE parsing and retry logic
-  evaluator/evaluate.py   LLM judge — scores transcripts against rubric
-```
-
-Communication: Python emits JSONL events to stdout. Go reads them via a pipe and routes to the TUI in real time. All simulation data is persisted in SQLite (one DB per scenario per generation).
+**Backend:** Python + OASIS. An orchestrator coordinates the full evolution loop — scenario generation, population seeding, parallel OASIS simulations, LLM evaluation, selection, and breeding. Custom `SocialAgent` subclasses override OASIS's default prompts for focused interactions in both private chat and public feed scenarios. All data persists in SQLite (one DB per scenario per generation).
 
 ---
 
+## Quick Start
+
+```bash
+git clone https://github.com/karmette/agent-kitchen.git
+cd agent-kitchen
+
+# Backend
+cd backend && uv sync --no-dev
+cp .env.example .env  # add your API key
+
+# Frontend
+cd ../frontend && go build -o agent-kitchen
+./agent-kitchen
+```
+
+Requires Python 3.11+, Go 1.21+, and an OpenAI-compatible API key.
+
+---
 
 *AI slop implies the existence of AI peak*
