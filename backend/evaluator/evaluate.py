@@ -48,11 +48,32 @@ For each criterion, cite the specific evidence, then score. Return ONLY valid JS
 """
 
 
-def _extract_transcripts(db_path, agents_spec):
+def _extract_transcripts(db_path, agents_spec, mode="group"):
     """Pull conversations from the DB, grouped by negotiator.
+
+    Dispatches to mode-specific extraction:
+      - group: reads group_messages (private chat)
+      - social: reads posts, comments, likes, follows (public activity)
+      - mixed: reads both
 
     Returns dict: {source_index: [transcript_string, ...]}
     """
+    if mode == "social":
+        return _extract_social_transcripts(db_path, agents_spec)
+    elif mode == "mixed":
+        group = _extract_group_transcripts(db_path, agents_spec)
+        social = _extract_social_transcripts(db_path, agents_spec)
+        # Merge: concatenate transcripts per source_index
+        merged = {}
+        for idx in set(list(group.keys()) + list(social.keys())):
+            merged[idx] = group.get(idx, []) + social.get(idx, [])
+        return merged
+    else:
+        return _extract_group_transcripts(db_path, agents_spec)
+
+
+def _extract_group_transcripts(db_path, agents_spec):
+    """Pull group chat conversations, grouped by negotiator."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
@@ -101,6 +122,87 @@ def _extract_transcripts(db_path, agents_spec):
 
     conn.close()
     return transcripts_by_negotiator
+
+
+def _extract_social_transcripts(db_path, agents_spec):
+    """Pull social activity (posts, comments, likes, follows) per negotiator."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    agent_info = {}
+    for agent_id, profile, is_neg, src_idx in agents_spec:
+        agent_info[agent_id] = (profile["name"], is_neg, src_idx)
+
+    # Build user_id -> agent_id mapping (OASIS assigns user_ids separately)
+    user_to_agent = {}
+    for row in conn.execute("SELECT user_id, agent_id FROM user").fetchall():
+        user_to_agent[row["user_id"]] = row["agent_id"]
+
+    def resolve(user_id):
+        aid = user_to_agent.get(user_id, user_id)
+        name, is_neg, src_idx = agent_info.get(aid, (f"User {user_id}", False, -1))
+        role = "AGENT" if is_neg else "OTHER"
+        return name, role, src_idx
+
+    # Load all posts
+    posts = conn.execute(
+        "SELECT post_id, user_id, content, created_at, num_likes, num_dislikes "
+        "FROM post ORDER BY created_at"
+    ).fetchall()
+
+    # Load all comments keyed by post_id
+    comments_by_post = {}
+    for c in conn.execute(
+        "SELECT comment_id, post_id, user_id, content, created_at "
+        "FROM comment ORDER BY created_at"
+    ).fetchall():
+        comments_by_post.setdefault(c["post_id"], []).append(c)
+
+    # Load follow counts per agent
+    follows_gained = {}
+    for f in conn.execute(
+        "SELECT followee_id, COUNT(*) as cnt FROM follow GROUP BY followee_id"
+    ).fetchall():
+        follows_gained[f["followee_id"]] = f["cnt"]
+
+    # Build transcript per negotiator source_index
+    transcripts = {}
+    for src_idx in set(info[2] for info in agent_info.values() if info[1]):
+        lines = []
+
+        # Find all agent_ids for this source_index
+        my_agent_ids = [aid for aid, (_, is_neg, si) in agent_info.items()
+                        if is_neg and si == src_idx]
+        my_user_ids = [uid for uid, aid in user_to_agent.items()
+                       if aid in my_agent_ids]
+
+        for post in posts:
+            poster_name, poster_role, _ = resolve(post["user_id"])
+            is_mine = post["user_id"] in my_user_ids
+
+            if is_mine:
+                lines.append(
+                    f"[{poster_role} — {poster_name}] POSTED: \"{post['content']}\"\n"
+                    f"  ({post['num_likes']} likes, {post['num_dislikes']} dislikes)")
+            else:
+                lines.append(
+                    f"[{poster_role} — {poster_name}] POSTED: \"{post['content']}\"")
+
+            # Add comments on this post
+            for c in comments_by_post.get(post["post_id"], []):
+                c_name, c_role, _ = resolve(c["user_id"])
+                lines.append(f"  [{c_role} — {c_name}] COMMENTED: \"{c['content']}\"")
+
+        # Add engagement summary
+        total_follows = sum(follows_gained.get(uid, 0) for uid in my_user_ids)
+        if total_follows > 0:
+            lines.append(f"\n[ENGAGEMENT SUMMARY] Gained {total_follows} followers")
+
+        if lines:
+            transcripts[src_idx] = ["\n".join(lines)]
+
+    conn.close()
+    return transcripts
 
 
 async def _score_once(client, model, transcript, rubric):
@@ -160,7 +262,7 @@ async def _score_transcript(client, model, transcript, rubric):
     }
 
 
-async def evaluate_generation(db_path, agents_spec, rubric, model=None):
+async def evaluate_generation(db_path, agents_spec, rubric, model=None, mode="group"):
     """Evaluate all negotiators in a simulation run.
 
     Args:
@@ -168,6 +270,7 @@ async def evaluate_generation(db_path, agents_spec, rubric, model=None):
         agents_spec: List of (agent_id, profile_dict, is_negotiator, source_index)
         rubric: Plain text rubric string.
         model: LLM model to use for judging.
+        mode: Scenario mode — "group", "social", or "mixed".
 
     Returns:
         Dict mapping source_index -> {"scores": {...}, "overall": float, "reasoning": str}
@@ -175,7 +278,7 @@ async def evaluate_generation(db_path, agents_spec, rubric, model=None):
     model = model or get_model()
     client = create_client()
 
-    transcripts = _extract_transcripts(db_path, agents_spec)
+    transcripts = _extract_transcripts(db_path, agents_spec, mode=mode)
     logger.info(f"Extracted transcripts for {len(transcripts)} negotiators")
 
     tasks = {}

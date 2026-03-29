@@ -343,18 +343,20 @@ func (m InputModel) View() string {
 		Bold(true).
 		Render(logo)
 
-	// Pipeline visualization — this IS the product explanation
+	// Pipeline visualization
 	pipeline := lg.JoinVertical(lg.Left,
 		"",
 		hintStyle.Render("evolve AI agents through"),
 		hintStyle.Render("simulated natural selection"),
 		"",
-		stepNumStyle.Render("1")+stepTextStyle.Render("  describe the agent you want"),
-		stepNumStyle.Render("2")+stepTextStyle.Render("  we generate diverse test scenarios"),
-		stepNumStyle.Render("3")+stepTextStyle.Render("  a population competes in simulations"),
-		stepNumStyle.Render("4")+stepTextStyle.Render("  an LLM judge scores each agent"),
-		stepNumStyle.Render("5")+stepTextStyle.Render("  top agents survive, mutate, breed"),
-		stepNumStyle.Render("6")+stepTextStyle.Render("  repeat — the best agent emerges"),
+		stepNumStyle.Render("1")+stepTextStyle.Render("  you describe the agent you want"),
+		stepNumStyle.Render("2")+stepTextStyle.Render("  AI generates diverse test scenarios"),
+		stepNumStyle.Render("3")+stepTextStyle.Render("  4 agents compete in live simulations"),
+		stepNumStyle.Render("4")+stepTextStyle.Render("  an LLM judge scores every interaction"),
+		stepNumStyle.Render("5")+stepTextStyle.Render("  weakest agents die, survivors mutate"),
+		stepNumStyle.Render("6")+stepTextStyle.Render("  repeat for N generations"),
+		"",
+		stepTextStyle.Render("  the output is the evolved agent's prompt"),
 	)
 
 	header := lg.JoinHorizontal(lg.Top, logoRendered, "   ", pipeline)
@@ -404,13 +406,13 @@ func (m InputModel) View() string {
 	gensBlock := lg.JoinVertical(lg.Left,
 		gensLabel.Render("Generations"),
 		m.iterationsTi.View(),
-		sublabelStyle.Render("rounds of evolution"),
+		sublabelStyle.Render("cycles of compete-score-breed"),
 	)
 
 	cellsBlock := lg.JoinVertical(lg.Left,
 		cellsLabel.Render("Scenarios"),
 		m.cellsTi.View(),
-		sublabelStyle.Render("situations to test in"),
+		sublabelStyle.Render("different situations to test"),
 	)
 
 	settings := lg.JoinHorizontal(lg.Top, "  ", gensBlock, "        ", cellsBlock)

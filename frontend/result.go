@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -93,6 +94,7 @@ type cell struct {
 	agentMetas map[int]*agentMeta           // group_id -> metadata
 	agentIDs   []int                        // ordered group_ids as they appear
 	scenario   string
+	mode       string                       // "group", "social", or "mixed"
 	activeTab  int                          // which agent tab is selected in detail view
 }
 
@@ -114,6 +116,7 @@ type ResultModel struct {
 	cells        []cell
 	mode         ViewMode
 	detailScroll int
+	exportMsg    string // temporary message after export
 	resultScroll int
 	content      string
 	tick         int
@@ -168,7 +171,12 @@ func (m *ResultModel) Update(msg tea.Msg) tea.Cmd {
 		case "r":
 			if FinalResult != nil {
 				m.mode = ModeResult
-				m.resultScroll = 0
+				m.resultScroll = 999999 // start at top — clamped by scrollView
+			}
+		case "e":
+			if m.mode == ModeResult && FinalResult != nil {
+				path := m.exportBestAgent()
+				m.exportMsg = fmt.Sprintf("exported → %s", path)
 			}
 		case "esc":
 			if m.mode != ModeGrid {
@@ -330,7 +338,12 @@ func (m *ResultModel) viewStatusBar(w int) string {
 	case ModeDetail:
 		right = softText.Render("↑↓: scroll · esc: back · q: quit")
 	case ModeResult:
-		right = softText.Render("↑↓: scroll · esc: back · q: quit")
+		if m.exportMsg != "" {
+			right = greenText.Render(m.exportMsg + " · ")
+		} else {
+			right = accent.Render("e: export · ")
+		}
+		right += softText.Render("↑↓: scroll · esc: back · q: quit")
 	}
 
 	gap := w - lg.Width(left) - lg.Width(right)
@@ -434,7 +447,8 @@ func (m *ResultModel) viewSidePanel(w, h int) string {
 	if FinalResult != nil {
 		items = append(items, greenText.Bold(true).Render("✓ evolution complete"))
 		items = append(items, greenText.Render(fmt.Sprintf("  best: %.0f%%", FinalResult.BestScore*100)))
-		items = append(items, accent.Render("  r → view evolved agent"))
+		items = append(items, "")
+		items = append(items, accent.Render("  r → results & prompt"))
 	} else {
 		gen := CurrentGeneration
 		total := m.iterations
@@ -452,6 +466,32 @@ func (m *ResultModel) viewSidePanel(w, h int) string {
 		if CurrentBestScore > 0 {
 			items = append(items, greenText.Render(fmt.Sprintf("  best so far: %.0f%%", CurrentBestScore*100)))
 		}
+		if CurrentPhase != "" {
+			items = append(items, cyanText.Render("  "+CurrentPhase))
+		}
+		// Contextual explanation
+		items = append(items, "")
+		switch CurrentPhase {
+		case "generating scenarios":
+			items = append(items, dim.Render(" AI is creating test"))
+			items = append(items, dim.Render(" scenarios for your agents"))
+		case "seeding population":
+			items = append(items, dim.Render(" creating 4 diverse agents"))
+			items = append(items, dim.Render(" with different strategies"))
+		case "simulating interactions":
+			items = append(items, dim.Render(" all 4 agents compete in"))
+			items = append(items, dim.Render(" every scenario below"))
+			items = append(items, dim.Render(" expand a cell to watch"))
+		case "scoring agents":
+			items = append(items, dim.Render(" LLM judge evaluates"))
+			items = append(items, dim.Render(" each agent's performance"))
+		case "natural selection":
+			items = append(items, dim.Render(" top performers survive"))
+			items = append(items, dim.Render(" weak agents eliminated"))
+		case "breeding next generation":
+			items = append(items, dim.Render(" mutating survivors to"))
+			items = append(items, dim.Render(" create new challengers"))
+		}
 	}
 	items = append(items, "")
 
@@ -462,6 +502,7 @@ func (m *ResultModel) viewSidePanel(w, h int) string {
 		if name == "" {
 			name = fmt.Sprintf("Scenario %d", i+1)
 		}
+
 		maxLen := w - 5
 		if len(name) > maxLen {
 			name = name[:maxLen-1] + "…"
@@ -552,12 +593,14 @@ func (m *ResultModel) viewDetail(w, h int) string {
 	if cell.status == StatusDone {
 		headerColor = green
 	}
+	modeBadge := ""
+
 	header := lg.NewStyle().
 		Background(bgPanel).
 		Foreground(headerColor).
-		Render(headerText)
+		Render(headerText) + modeBadge
 
-	// Tab bar — show generation + agent name per tab
+	// Tab bar
 	numAgents := len(cell.agentIDs)
 	tabSection := ""
 	usedLines := 2
@@ -568,14 +611,19 @@ func (m *ResultModel) viewDetail(w, h int) string {
 			meta := cell.agentMetas[gid]
 			label := fmt.Sprintf(" %d ", i+1)
 			if meta != nil {
-				name := meta.name
-				if len(name) > 8 {
-					name = name[:8]
-				}
-				if name != "" {
-					label = fmt.Sprintf(" G%d·%s ", meta.generation, name)
+				if gid == -1 {
+					// Feed tab for social activity
+					label = fmt.Sprintf(" G%d·feed ", meta.generation)
 				} else {
-					label = fmt.Sprintf(" G%d·#%d ", meta.generation, i+1)
+					name := meta.name
+					if len(name) > 8 {
+						name = name[:8]
+					}
+					if name != "" {
+						label = fmt.Sprintf(" G%d·%s ", meta.generation, name)
+					} else {
+						label = fmt.Sprintf(" G%d·#%d ", meta.generation, i+1)
+					}
 				}
 			}
 			if i == cell.activeTab {
@@ -594,7 +642,14 @@ func (m *ResultModel) viewDetail(w, h int) string {
 		if numAgents > 1 {
 			tabs += dim.Render("←→")
 		}
-		tabSection = tabs
+
+		// Explain what tabs are
+		tabHint := ""
+		if numAgents > 1 {
+			tabHint = dim.Render("  each tab is a different evolved agent being tested")
+		}
+
+		tabSection = tabs + tabHint
 		usedLines = 4
 	}
 
@@ -626,22 +681,17 @@ func (m *ResultModel) viewResult(w, h int) string {
 		return "No results"
 	}
 
-	topH := h * 55 / 100
-	if topH < 12 {
-		topH = 12
-	}
-	botH := h - topH - 2
+	var b strings.Builder
+	contentW := w - 4
 
-	leftW := w * 55 / 100
-	rightW := w - leftW
-
-	// Left: header + chart
-	var left strings.Builder
-	left.WriteString(goldText.Render(" ★ EVOLUTION COMPLETE") + "\n")
-	left.WriteString(softText.Render(fmt.Sprintf(" %s", r.Goal)) + "\n")
-	left.WriteString(dim.Render(fmt.Sprintf(" %d agents × %d generations × %d scenarios",
+	// ═══ HEADER ═══
+	b.WriteString("\n")
+	b.WriteString(goldText.Bold(true).Render("  ★ EVOLUTION COMPLETE") + "\n")
+	b.WriteString(softText.Render(fmt.Sprintf("  %s", r.Goal)) + "\n")
+	b.WriteString(dim.Render(fmt.Sprintf("  %d agents × %d generations × %d scenarios",
 		r.PopSize, len(r.Generations), len(r.ScenarioNames))) + "\n\n")
 
+	// Big score display
 	improvement := 0.0
 	if len(r.Generations) > 1 {
 		first := r.Generations[0].BestScore
@@ -649,155 +699,203 @@ func (m *ResultModel) viewResult(w, h int) string {
 			improvement = ((r.BestScore - first) / first) * 100
 		}
 	}
-	left.WriteString(greenText.Bold(true).Render(fmt.Sprintf(" %.0f%%", r.BestScore*100)))
-	left.WriteString(softText.Render(" final best score"))
+	scoreStr := fmt.Sprintf("%.0f%%", r.BestScore*100)
+	b.WriteString(greenText.Bold(true).Render("  "+scoreStr))
+	b.WriteString(softText.Render(" final best"))
 	if improvement > 0 {
-		left.WriteString(greenText.Render(fmt.Sprintf("  ↑%.0f%% improvement", improvement)))
+		b.WriteString(greenText.Render(fmt.Sprintf("  ↑%.0f%%", improvement)))
 	}
-	left.WriteString("\n\n")
+	b.WriteString("\n\n")
 
+	// ═══ FITNESS CHART ═══
+	b.WriteString(dim.Render("  ─── Fitness Over Generations ───") + "\n")
+	b.WriteString(dim.Render("  ") +
+		lg.NewStyle().Foreground(purple).Render("█") + dim.Render(" best  ") +
+		lg.NewStyle().Foreground(blue).Render("░") + dim.Render(" avg") + "\n")
 	if len(r.Generations) > 0 {
-		left.WriteString(dim.Render(" Fitness Over Generations") + "\n")
-		left.WriteString(dim.Render(" ") +
-			lg.NewStyle().Foreground(purple).Render("█") + dim.Render(" best agent  ") +
-			lg.NewStyle().Foreground(blue).Render("░") + dim.Render(" population avg") + "\n")
-		left.WriteString(m.buildDualChart(r.Generations, leftW-4))
+		b.WriteString(m.buildDualChart(r.Generations, contentW))
+	}
+	b.WriteString("\n")
+
+	// ═══ GENERATION TIMELINE ═══
+	b.WriteString(dim.Render("  ─── Generation Timeline ───") + "\n\n")
+	for gen := 0; gen < len(r.Generations); gen++ {
+		g := r.Generations[gen]
+		genLabel := amberText.Render(fmt.Sprintf("  Gen %d", gen))
+
+		bestPct := fmt.Sprintf("%.0f%%", g.BestScore*100)
+		avgPct := fmt.Sprintf("%.0f%%", g.AvgScore*100)
+
+		b.WriteString(genLabel + "  " +
+			greenText.Render("best "+bestPct) + "  " +
+			softText.Render("avg "+avgPct))
+
+		// Diversity indicator
+		d := g.Diversity
+		divLabel := ""
+		if d > 0.4 {
+			divLabel = greenText.Render(" ●")
+		} else if d > 0.2 {
+			divLabel = amberText.Render(" ◐")
+		} else {
+			divLabel = lg.NewStyle().Foreground(lg.Color("#FF5555")).Render(" ○")
+		}
+		b.WriteString("  " + dim.Render("diversity") + divLabel)
+
+		// Selection info
+		if len(g.Survivors) > 0 {
+			b.WriteString("  " + dim.Render(fmt.Sprintf("%d↑ %d↓",
+				len(g.Survivors), len(g.Eliminated))))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
+	// ═══ FINAL LEADERBOARD ═══
+	b.WriteString(dim.Render("  ─── Final Leaderboard ───") + "\n")
+	b.WriteString(dim.Render("  each agent's best performance across all generations") + "\n\n")
+
+	// Build leaderboard from AllScores — take each genome's best result
+	bestByGenome := make(map[string]AgentScore)
+	for _, as := range r.AllScores {
+		if prev, exists := bestByGenome[as.GenomeID]; !exists || as.Overall > prev.Overall {
+			bestByGenome[as.GenomeID] = as
+		}
+	}
+	var leaderboard []AgentScore
+	for _, as := range bestByGenome {
+		leaderboard = append(leaderboard, as)
 	}
 
-	leftPane := lg.NewStyle().Width(leftW).Height(topH).Render(left.String())
+	if len(leaderboard) > 0 {
+		sorted := leaderboard
+		for i := 0; i < len(sorted); i++ {
+			for j := i + 1; j < len(sorted); j++ {
+				if sorted[j].Overall > sorted[i].Overall {
+					sorted[i], sorted[j] = sorted[j], sorted[i]
+				}
+			}
+		}
 
-	// Right: tree + scenarios
-	var right strings.Builder
+		barLen := contentW/3
+		if barLen < 5 { barLen = 5 }
+		if barLen > 30 { barLen = 30 }
 
-	// ── Winner's Lineage ──
-	right.WriteString(amberText.Bold(true).Render(" Winner's Lineage") + "\n")
-	right.WriteString(dim.Render(" score of the best agent across generations") + "\n\n")
+		for rank, agent := range sorted {
+			id := agent.GenomeID
+			if len(id) > 8 { id = id[:8] }
 
-	tree := m.buildEvolutionTree(r, rightW-2)
-	right.WriteString(tree)
+			filled := int(agent.Overall * float64(barLen))
+			if filled > barLen { filled = barLen }
 
-	right.WriteString("\n")
+			barColor := purple
+			if rank == 0 {
+				barColor = green
+			} else if agent.Overall < 0.4 {
+				barColor = lg.Color("#FF5555")
+			}
 
-	// ── Population Health ──
-	totalSurvived := 0
-	totalEliminated := 0
-	for _, gen := range r.Generations {
-		totalSurvived += len(gen.Survivors)
-		totalEliminated += len(gen.Eliminated)
-	}
-	right.WriteString(amberText.Bold(true).Render(" Population") + "\n")
-	right.WriteString(fmt.Sprintf(" %s %d survived  %s %d eliminated  ",
-		greenText.Render("▲"), totalSurvived,
-		dim.Render("▼"), totalEliminated))
-	right.WriteString(dim.Render(fmt.Sprintf("over %d gens", len(r.Generations))) + "\n")
+			bar := lg.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
+				dim.Render(strings.Repeat("░", barLen-filled))
 
-	// Diversity sparkline
-	if len(r.Generations) > 0 {
-		right.WriteString(dim.Render(" genetic diversity: "))
-		for i, gen := range r.Generations {
-			d := gen.Diversity
-			if d > 0.4 {
-				right.WriteString(greenText.Render("█"))
-			} else if d > 0.2 {
-				right.WriteString(amberText.Render("▆"))
-			} else if d > 0.1 {
-				right.WriteString(amberText.Render("▃"))
+			medal := "  "
+			if rank == 0 {
+				medal = goldText.Render("★ ")
+			} else if rank == 1 {
+				medal = softText.Render("▪ ")
 			} else {
-				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render("▁"))
+				medal = dim.Render("  ")
 			}
-			_ = i
-		}
-		right.WriteString(dim.Render("  high=diverse") + "\n")
-	}
-	right.WriteString("\n")
 
-	// ── Scenario Breakdown ──
-	right.WriteString(cyanText.Bold(true).Render(" Scenario Breakdown") + "\n")
-	right.WriteString(dim.Render(" how the winner scored on each test scenario") + "\n\n")
-	if len(r.FinalScores) > 0 {
-		var best *AgentScore
-		for i := range r.FinalScores {
-			if best == nil || r.FinalScores[i].Overall > best.Overall {
-				best = &r.FinalScores[i]
-			}
-		}
-		if best != nil {
-			bestIdx, worstIdx := 0, 0
-			for i, score := range best.ScenarioScores {
-				name := fmt.Sprintf("S%d", i+1)
-				if i < len(r.ScenarioNames) && r.ScenarioNames[i] != "" {
-					name = r.ScenarioNames[i]
-					if len(name) > rightW-12 {
-						name = name[:rightW-13] + "…"
-					}
-				}
-				barLen := rightW/3 - 2
-				if barLen < 3 {
-					barLen = 3
-				}
-				filled := int(score * float64(barLen))
-				if filled > barLen {
-					filled = barLen
-				}
-				// Color bars by performance
-				barColor := purple
-				if score >= 0.7 {
-					barColor = green
-				} else if score < 0.4 {
-					barColor = lg.Color("#FF5555")
-				}
-				bar := lg.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
-					dim.Render(strings.Repeat("░", barLen-filled))
-				right.WriteString(fmt.Sprintf(" %s %.0f%%\n", bar, score*100))
-				right.WriteString(softText.Render(fmt.Sprintf(" %s", name)) + "\n")
+			pctStr := fmt.Sprintf("%.0f%%", agent.Overall*100)
+			b.WriteString(fmt.Sprintf("  %s%s %s %s",
+				medal, bar, greenText.Render(pctStr), dim.Render(id)))
 
-				if score > best.ScenarioScores[bestIdx] {
-					bestIdx = i
+			// Show per-scenario mini scores
+			if len(agent.ScenarioScores) > 0 {
+				b.WriteString(dim.Render("  ["))
+				for si, ss := range agent.ScenarioScores {
+					if si > 0 { b.WriteString(dim.Render(" ")) }
+					c := softDim
+					if ss >= 0.7 { c = green }
+					if ss < 0.4 { c = lg.Color("#FF5555") }
+					b.WriteString(lg.NewStyle().Foreground(c).Render(fmt.Sprintf("%.0f", ss*100)))
 				}
-				if score < best.ScenarioScores[worstIdx] {
-					worstIdx = i
-				}
+				b.WriteString(dim.Render("]"))
 			}
-			// Strength/weakness
-			if len(best.ScenarioScores) > 1 {
-				right.WriteString("\n")
-				bestName := "?"
-				worstName := "?"
-				if bestIdx < len(r.ScenarioNames) {
-					bestName = r.ScenarioNames[bestIdx]
-				}
-				if worstIdx < len(r.ScenarioNames) {
-					worstName = r.ScenarioNames[worstIdx]
-				}
-				if len(bestName) > rightW-20 {
-					bestName = bestName[:rightW-21] + "…"
-				}
-				if len(worstName) > rightW-20 {
-					worstName = worstName[:rightW-21] + "…"
-				}
-				right.WriteString(greenText.Render(" ✦ strongest: ") + softText.Render(bestName) + "\n")
-				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render(" ○ weakest:   ") + softText.Render(worstName) + "\n")
+
+			// Lineage
+			if len(agent.ParentIDs) > 0 {
+				p := agent.ParentIDs[0]
+				if len(p) > 6 { p = p[:6] }
+				b.WriteString(dim.Render(fmt.Sprintf(" ←%s", p)))
 			}
+
+			if rank == 0 {
+				b.WriteString(goldText.Render(" winner"))
+			}
+			b.WriteString("\n")
 		}
 	}
+	b.WriteString("\n")
 
-	rightPane := lg.NewStyle().Width(rightW).Height(topH).Render(right.String())
-	topRow := lg.JoinHorizontal(lg.Top, leftPane, rightPane)
+	// ═══ SCENARIO BREAKDOWN ═══
+	b.WriteString(dim.Render("  ─── Scenario Breakdown ───") + "\n")
+	b.WriteString(dim.Render("  winner's score on each test scenario") + "\n\n")
 
-	divider := dim.Render(strings.Repeat("─", w))
+	// Find the winner's best scores from AllScores
+	var best *AgentScore
+	for i := range r.AllScores {
+		if best == nil || r.AllScores[i].Overall > best.Overall {
+			best = &r.AllScores[i]
+		}
+	}
+	if best != nil {
+		barLen := contentW/3
+		if barLen < 5 { barLen = 5 }
+		if barLen > 30 { barLen = 30 }
 
+		for i, score := range best.ScenarioScores {
+			name := fmt.Sprintf("Scenario %d", i+1)
+			if i < len(r.ScenarioNames) && r.ScenarioNames[i] != "" {
+				name = r.ScenarioNames[i]
+			}
+			if len(name) > contentW-barLen-10 {
+				name = name[:contentW-barLen-11] + "…"
+			}
+
+			filled := int(score * float64(barLen))
+			if filled > barLen { filled = barLen }
+
+			barColor := purple
+			if score >= 0.7 { barColor = green }
+			if score < 0.4 { barColor = lg.Color("#FF5555") }
+
+			bar := lg.NewStyle().Foreground(barColor).Render(strings.Repeat("█", filled)) +
+				dim.Render(strings.Repeat("░", barLen-filled))
+
+			b.WriteString(fmt.Sprintf("  %s %.0f%%  %s\n",
+				bar, score*100, softText.Render(name)))
+		}
+	}
+	b.WriteString("\n")
+
+	// ═══ EVOLVED PROMPT ═══
 	genomeLabel := r.BestGenome
-	if len(genomeLabel) > 12 {
-		genomeLabel = genomeLabel[:12]
-	}
-	promptHeader := lg.NewStyle().Background(bgPanel).Foreground(brightBlue).
-		Width(w).
-		Render(fmt.Sprintf(" Evolved Agent Prompt · %s", genomeLabel))
+	if len(genomeLabel) > 12 { genomeLabel = genomeLabel[:12] }
+	b.WriteString(lg.NewStyle().Background(bgPanel).Foreground(brightBlue).
+		Width(contentW+4).
+		Render(fmt.Sprintf(" Evolved Agent Prompt · %s", genomeLabel)) + "\n\n")
+	b.WriteString(m.colorizePrompt(r.BestPrompt, contentW))
 
-	prompt := m.colorizePrompt(r.BestPrompt, w-4)
-	scrolled := m.scrollView(prompt, botH-2, &m.resultScroll)
+	// ═══ RUBRIC ═══
+	b.WriteString("\n")
+	b.WriteString(lg.NewStyle().Background(bgPanel).Foreground(brightBlue).
+		Width(contentW+4).
+		Render(" Evaluation Rubric") + "\n\n")
+	b.WriteString(m.colorizePrompt(r.Rubric, contentW))
 
-	return topRow + "\n" + divider + "\n" + promptHeader + "\n" + scrolled
+	return m.scrollView(b.String(), h, &m.resultScroll)
 }
 
 func (m *ResultModel) colorizePrompt(prompt string, maxWidth int) string {
@@ -972,14 +1070,29 @@ func (m *ResultModel) styleCellPreview(raw string, maxWidth, maxLines int) strin
 
 		if strings.HasPrefix(block, ">>>") {
 			content := strings.TrimPrefix(block, ">>>")
-			// Take first line of agent message
-			firstLine := strings.SplitN(strings.TrimSpace(content), "\n", 2)[0]
-			if len(firstLine) > maxWidth-2 {
-				firstLine = firstLine[:maxWidth-2] + "…"
+			// Strip POST:/REPLY: prefixes
+			content = strings.TrimPrefix(content, "POST:")
+			content = strings.TrimPrefix(content, "REPLY:")
+			// First line is name, second is message content
+			parts := strings.SplitN(strings.TrimSpace(content), "\n", 2)
+			name := parts[0]
+			msg := ""
+			if len(parts) > 1 {
+				msg = strings.TrimSpace(parts[1])
 			}
-			styled = append(styled, lg.NewStyle().Foreground(purple).Render("▎")+" "+firstLine)
+			display := name
+			if msg != "" {
+				display = msg
+			}
+			if len(display) > maxWidth-2 {
+				display = display[:maxWidth-2] + "…"
+			}
+			styled = append(styled, lg.NewStyle().Foreground(purple).Render("▎")+" "+display)
 		} else if strings.HasPrefix(block, "<<<") {
 			content := strings.TrimPrefix(block, "<<<")
+			// Strip POST:/REPLY: prefixes
+			content = strings.TrimPrefix(content, "POST:")
+			content = strings.TrimPrefix(content, "REPLY:")
 			parts := strings.SplitN(content, "\n", 2)
 			if len(parts) > 1 {
 				firstLine := strings.SplitN(strings.TrimSpace(parts[1]), "\n", 2)[0]
@@ -1014,6 +1127,15 @@ func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
 
 		if strings.HasPrefix(block, ">>>") {
 			raw := strings.TrimPrefix(block, ">>>")
+			// Detect post/reply markers: POST:Name or REPLY:Name
+			actionType := "chat"
+			if strings.HasPrefix(raw, "POST:") {
+				raw = strings.TrimPrefix(raw, "POST:")
+				actionType = "post"
+			} else if strings.HasPrefix(raw, "REPLY:") {
+				raw = strings.TrimPrefix(raw, "REPLY:")
+				actionType = "reply"
+			}
 			// First line is agent name, rest is content
 			parts := strings.SplitN(raw, "\n", 2)
 			agentName := strings.TrimSpace(parts[0])
@@ -1023,8 +1145,14 @@ func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
 			}
 			label := defaultAgentLabel
 			if agentName != "" {
+				suffix := " (agent)"
+				if actionType == "post" {
+					suffix = " posted"
+				} else if actionType == "reply" {
+					suffix = " replied"
+				}
 				label = lg.NewStyle().Foreground(purple).Bold(true).Render("  "+agentName) +
-					dim.Render(" (agent)")
+					dim.Render(suffix)
 			}
 			result.WriteString("\n" + label + "\n")
 			wrapped := m.wordWrap(content, maxWidth-6)
@@ -1036,14 +1164,29 @@ func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
 		} else if strings.HasPrefix(block, "<<<") {
 			// Counterparty message — name is on the first line after <<<
 			content := strings.TrimPrefix(block, "<<<")
+			// Detect post/reply markers
+			actionType := "chat"
+			if strings.HasPrefix(content, "POST:") {
+				content = strings.TrimPrefix(content, "POST:")
+				actionType = "post"
+			} else if strings.HasPrefix(content, "REPLY:") {
+				content = strings.TrimPrefix(content, "REPLY:")
+				actionType = "reply"
+			}
 			parts := strings.SplitN(content, "\n", 2)
 			name := strings.TrimSpace(parts[0])
 			body := ""
 			if len(parts) > 1 {
 				body = strings.TrimSpace(parts[1])
 			}
+			suffix := " (counterparty)"
+			if actionType == "post" {
+				suffix = " posted"
+			} else if actionType == "reply" {
+				suffix = " replied"
+			}
 			nameLabel := lg.NewStyle().Foreground(cyan).Bold(true).Render("  "+name) +
-				dim.Render(" (counterparty)")
+				dim.Render(suffix)
 			result.WriteString("\n" + nameLabel + "\n")
 			if body != "" {
 				wrapped := m.wordWrap(body, maxWidth-6)
@@ -1169,4 +1312,44 @@ func (m *ResultModel) truncStr(s string, max int) string {
 		return s[:max]
 	}
 	return s[:max-1] + "…"
+}
+
+func (m *ResultModel) exportBestAgent() string {
+	r := FinalResult
+	if r == nil {
+		return ""
+	}
+
+	// Build export content
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("# Evolved Agent: %s\n\n", r.Goal))
+	b.WriteString(fmt.Sprintf("Score: %.0f%%\n", r.BestScore*100))
+	b.WriteString(fmt.Sprintf("Genome: %s\n", r.BestGenome))
+	b.WriteString(fmt.Sprintf("Population: %d agents × %d generations × %d scenarios\n\n",
+		r.PopSize, len(r.Generations), len(r.ScenarioNames)))
+	b.WriteString("## Scenarios Tested\n")
+	for i, name := range r.ScenarioNames {
+		score := ""
+		// Find best agent's score for this scenario
+		var best *AgentScore
+		for j := range r.FinalScores {
+			if best == nil || r.FinalScores[j].Overall > best.Overall {
+				best = &r.FinalScores[j]
+			}
+		}
+		if best != nil && i < len(best.ScenarioScores) {
+			score = fmt.Sprintf(" (%.0f%%)", best.ScenarioScores[i]*100)
+		}
+		b.WriteString(fmt.Sprintf("- %s%s\n", name, score))
+	}
+	b.WriteString("\n## Rubric\n")
+	b.WriteString(r.Rubric)
+	b.WriteString("\n\n## Evolved Prompt\n\n")
+	b.WriteString(r.BestPrompt)
+	b.WriteString("\n")
+
+	// Write to file
+	path := "evolved_agent.md"
+	os.WriteFile(path, []byte(b.String()), 0644)
+	return path
 }
