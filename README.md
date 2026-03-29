@@ -194,10 +194,5 @@ go build -o agent-kitchen
 
 ---
 
-## Team
 
-Built at the TAMU Datathon 2026 by the Karmette team.
-
----
-
-*The best prompt is the one you never had to write.*
+*AI slop implies the existence of AI peak*
