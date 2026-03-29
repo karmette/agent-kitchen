@@ -108,7 +108,7 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 		args := []string{
 			"orchestrator.py",
 			goal,
-			"--population", "6",
+			"--population", "4",
 			"--generations", fmt.Sprintf("%d", generations),
 			"--scenarios", fmt.Sprintf("%d", len(cells)),
 		}
@@ -193,6 +193,23 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 					}
 				}
 
+			case "simulation_complete":
+				idx := event.ScenarioID
+				if idx < len(cells) {
+					marker := fmt.Sprintf("\n── chat ended (gen %d) ──\n\n", event.Generation)
+					// Write into all agent buffers for this cell
+					for _, gid := range cells[idx].agentIDs {
+						if buf, ok := cells[idx].agents[gid]; ok {
+							buf.WriteString(marker)
+						}
+					}
+					// Also send to preview channel
+					select {
+					case cells[idx].conv.ch <- marker:
+					default:
+					}
+				}
+
 			case "scenario_start":
 				idx := event.ScenarioID
 				if idx < len(cells) {
@@ -222,7 +239,15 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 				if _, exists := cells[idx].agents[event.GroupID]; !exists {
 					b := &strings.Builder{}
 					cells[idx].agents[event.GroupID] = b
+					cells[idx].agentMetas[event.GroupID] = &agentMeta{generation: currentGen}
 					cells[idx].agentIDs = append(cells[idx].agentIDs, event.GroupID)
+				}
+
+				// Track agent name from first negotiator message in this group
+				if event.Role == "negotiator" {
+					if meta := cells[idx].agentMetas[event.GroupID]; meta != nil && meta.name == "" {
+						meta.name = event.Sender
+					}
 				}
 
 				content := event.Content
@@ -235,6 +260,10 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 						}
 					}
 				}
+				// Strip wrapping quotes LLMs sometimes add
+				if len(content) >= 2 && content[0] == '"' && content[len(content)-1] == '"' {
+					content = content[1 : len(content)-1]
+				}
 				// Flatten to single line — these are chat messages, not emails
 				content = strings.ReplaceAll(content, "\\n", " ")
 				content = strings.ReplaceAll(content, "\n", " ")
@@ -246,7 +275,7 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 				// Use block markers: >>>\n...\n<<< for agent, <<<name\n...\n<<< for counterparty
 				var line string
 				if event.Role == "negotiator" {
-					line = ">>>\n" + content + "\n<<<\n"
+					line = ">>>" + event.Sender + "\n" + content + "\n<<<\n"
 				} else {
 					line = "<<<" + event.Sender + "\n" + content + "\n<<<\n"
 				}
@@ -305,9 +334,16 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 				currentEliminated = nil
 				CurrentBestScore = event.BestScore
 				logActivity(fmt.Sprintf("gen %d best: %.0f%%", event.Generation, event.BestScore*100))
+				divider := fmt.Sprintf("\n══ Gen %d complete · best: %.0f%% ══\n\n",
+					event.Generation, event.BestScore*100)
 				for i := range cells {
-					divider := fmt.Sprintf("\n══ Gen %d done · best: %.0f%% ══\n\n",
-						event.Generation, event.BestScore*100)
+					// Write into all agent buffers so detail view shows it
+					for _, gid := range cells[i].agentIDs {
+						if buf, ok := cells[i].agents[gid]; ok {
+							buf.WriteString(divider)
+						}
+					}
+					// Also send to preview channel
 					select {
 					case cells[i].conv.ch <- divider:
 					default:

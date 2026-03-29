@@ -18,8 +18,9 @@ from camel.prompts import TextPrompt
 from camel.types import ModelPlatformType, ModelType
 
 import oasis
-from oasis import (ActionType, AgentGraph, LLMAction, SocialAgent, UserInfo)
+from oasis import (ActionType, AgentGraph, LLMAction, UserInfo)
 
+from chat_agent import ChatSocialAgent
 from topology import build_topology
 from events import emit, poll_messages
 
@@ -53,7 +54,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
 
     template = TextPrompt(scenario["template"])
     topology_config = scenario.get("topology", {"mode": "pairwise"})
-    action_names = scenario.get("actions", ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"])
+    action_names = scenario.get("actions", ["SEND_TO_GROUP"])
     num_rounds = scenario.get("num_rounds", 5)
 
     available_actions = [ActionType[a] for a in action_names]
@@ -73,7 +74,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
     _real_stdout = sys.stdout
     sys.stdout = sys.stderr  # suppress CAMEL warnings from stdout
     for agent_id, profile, is_negotiator, source_idx in agents_spec:
-        agent = SocialAgent(
+        agent = ChatSocialAgent(
             agent_id=agent_id,
             user_info=UserInfo(
                 user_name=profile["username"],
@@ -102,11 +103,16 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
         agent_graph=agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
         database_path=db_path,
-        semaphore=64,
+        semaphore=16,
     )
     sys.stdout = _real_stdout
 
     await env.reset()
+
+    # Set DB path on each agent so they can read conversation history
+    for _, agent in env.agent_graph.get_agents():
+        if isinstance(agent, ChatSocialAgent):
+            agent.db_path = db_path
 
     # Wire up groups
     emit({"type": "simulation_start", "generation": generation,
@@ -133,16 +139,32 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
         poll_messages(db_path, agents_spec, stop_poller, generation, scenario_id)
     )
 
-    # Simulation rounds
+    # Split agents into negotiators and counterparties for turn-taking
+    negotiator_ids = [aid for aid, _, is_neg, _ in agents_spec if is_neg]
+    counterparty_ids = [aid for aid, _, is_neg, _ in agents_spec if not is_neg]
+
+    # Simulation rounds — alternate turns for natural dialogue
+    # Each "round" is two half-steps: counterparty speaks, then negotiator responds
     for round_num in range(1, num_rounds + 1):
         emit({"type": "round_start", "generation": generation, "round": round_num,
               "total_rounds": num_rounds})
         log(f"\n  Round {round_num}/{num_rounds}")
 
-        await env.step({
-            agent: LLMAction()
-            for _, agent in env.agent_graph.get_agents()
-        })
+        # Counterparties go first (set the scene / respond)
+        cp_agents = {
+            env.agent_graph.get_agent(aid): LLMAction()
+            for aid in counterparty_ids
+        }
+        if cp_agents:
+            await env.step(cp_agents)
+
+        # Negotiators respond (the agents being evolved)
+        neg_agents = {
+            env.agent_graph.get_agent(aid): LLMAction()
+            for aid in negotiator_ids
+        }
+        if neg_agents:
+            await env.step(neg_agents)
 
         emit({"type": "round_complete", "generation": generation, "round": round_num})
 
@@ -153,7 +175,8 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
 
     await env.close()
 
-    emit({"type": "simulation_complete", "generation": generation, "db_path": db_path})
+    emit({"type": "simulation_complete", "generation": generation,
+          "scenario_id": scenario_id, "db_path": db_path})
     log(f"\n  Simulation complete — {db_path}")
 
     return db_path, agents_spec

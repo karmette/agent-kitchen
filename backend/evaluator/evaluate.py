@@ -15,10 +15,27 @@ from llm import create_client, complete, parse_json, get_model
 
 logger = logging.getLogger(__name__)
 
-NUM_EVALS = 3  # evaluations per transcript, averaged for stability
+NUM_EVALS = 1
 
 EVAL_PROMPT = """\
-You are an impartial judge evaluating an AI agent's performance in a simulation.
+You are a deterministic scoring system. Your scores must be reproducible — \
+the same transcript must always produce the same scores.
+
+## Scoring method
+For each criterion, count the specific evidence in the transcript:
+
+1. Read the full transcript
+2. For each criterion, list the concrete moments that demonstrate it
+3. Score based on quantity and quality of evidence:
+   - 0.0 = zero evidence, agent didn't address this at all
+   - 0.2 = mentioned once but superficially
+   - 0.4 = attempted but ineffective or partially wrong
+   - 0.6 = competent, addressed adequately with some evidence
+   - 0.8 = strong, multiple clear demonstrations
+   - 1.0 = exceptional, consistent mastery throughout the conversation
+4. If the transcript is empty or agent didn't participate, all scores = 0.0
+5. Overall = weighted average if weights given, otherwise simple average
+6. Do NOT round to convenient numbers. Use the scale precisely.
 
 ## Rubric
 {rubric}
@@ -26,14 +43,8 @@ You are an impartial judge evaluating an AI agent's performance in a simulation.
 ## Transcript
 {transcript}
 
-Score the agent on each criterion in the rubric from 0.0 to 1.0.
-Also provide an overall score (weighted average of all criteria).
-
-Be precise and consistent. Base scores strictly on observable behavior in \
-the transcript, not on assumptions about what might have happened.
-
-Return ONLY valid JSON (no markdown, no code blocks):
-{{"scores": {{"criterion_name": float, ...}}, "overall": float, "reasoning": "brief explanation"}}
+For each criterion, cite the specific evidence, then score. Return ONLY valid JSON:
+{{"scores": {{"criterion_name": float, ...}}, "overall": float, "reasoning": "evidence summary"}}
 """
 
 

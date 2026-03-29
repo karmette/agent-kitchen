@@ -80,14 +80,20 @@ const (
 	StatusError   CellStatus = "✗"
 )
 
+type agentMeta struct {
+	generation int
+	name       string // agent name (first negotiator seen in this group)
+}
+
 type cell struct {
-	status    CellStatus
-	conv      conversation
-	content   strings.Builder              // first agent's conversation (for preview)
-	agents    map[int]*strings.Builder     // group_id -> conversation content
-	agentIDs  []int                        // ordered group_ids as they appear
-	scenario  string
-	activeTab int                          // which agent tab is selected in detail view
+	status     CellStatus
+	conv       conversation
+	content    strings.Builder              // first agent's conversation (for preview)
+	agents     map[int]*strings.Builder     // group_id -> conversation content
+	agentMetas map[int]*agentMeta           // group_id -> metadata
+	agentIDs   []int                        // ordered group_ids as they appear
+	scenario   string
+	activeTab  int                          // which agent tab is selected in detail view
 }
 
 type ViewMode int
@@ -119,6 +125,7 @@ func NewResultModel(rows, cols, iterations, numCells int) *ResultModel {
 		cells[i].status = StatusPending
 		cells[i].conv = newConversation()
 		cells[i].agents = make(map[int]*strings.Builder)
+		cells[i].agentMetas = make(map[int]*agentMeta)
 	}
 	return &ResultModel{
 		rows: rows, cols: cols, iterations: iterations,
@@ -550,15 +557,27 @@ func (m *ResultModel) viewDetail(w, h int) string {
 		Foreground(headerColor).
 		Render(headerText)
 
-	// Tab bar — separated from header with label
+	// Tab bar — show generation + agent name per tab
 	numAgents := len(cell.agentIDs)
 	tabSection := ""
 	usedLines := 2
-	if numAgents > 1 {
-		tabLabel := dim.Render(" agents ")
+	if numAgents > 0 {
 		var tabs string
 		for i := 0; i < numAgents; i++ {
+			gid := cell.agentIDs[i]
+			meta := cell.agentMetas[gid]
 			label := fmt.Sprintf(" %d ", i+1)
+			if meta != nil {
+				name := meta.name
+				if len(name) > 8 {
+					name = name[:8]
+				}
+				if name != "" {
+					label = fmt.Sprintf(" G%d·%s ", meta.generation, name)
+				} else {
+					label = fmt.Sprintf(" G%d·#%d ", meta.generation, i+1)
+				}
+			}
 			if i == cell.activeTab {
 				tabs += lg.NewStyle().
 					Background(purple).
@@ -572,9 +591,11 @@ func (m *ResultModel) viewDetail(w, h int) string {
 					Render(label) + " "
 			}
 		}
-		tabs += dim.Render("←→")
-		tabSection = tabLabel + tabs
-		usedLines = 5
+		if numAgents > 1 {
+			tabs += dim.Render("←→")
+		}
+		tabSection = tabs
+		usedLines = 4
 	}
 
 	// Get the active agent's conversation
@@ -629,16 +650,17 @@ func (m *ResultModel) viewResult(w, h int) string {
 		}
 	}
 	left.WriteString(greenText.Bold(true).Render(fmt.Sprintf(" %.0f%%", r.BestScore*100)))
-	left.WriteString(softText.Render(" best"))
+	left.WriteString(softText.Render(" final best score"))
 	if improvement > 0 {
-		left.WriteString(greenText.Render(fmt.Sprintf("  ↑%.0f%%", improvement)))
+		left.WriteString(greenText.Render(fmt.Sprintf("  ↑%.0f%% improvement", improvement)))
 	}
 	left.WriteString("\n\n")
 
 	if len(r.Generations) > 0 {
+		left.WriteString(dim.Render(" Fitness Over Generations") + "\n")
 		left.WriteString(dim.Render(" ") +
-			lg.NewStyle().Foreground(purple).Render("█") + dim.Render(" best  ") +
-			lg.NewStyle().Foreground(blue).Render("░") + dim.Render(" avg") + "\n")
+			lg.NewStyle().Foreground(purple).Render("█") + dim.Render(" best agent  ") +
+			lg.NewStyle().Foreground(blue).Render("░") + dim.Render(" population avg") + "\n")
 		left.WriteString(m.buildDualChart(r.Generations, leftW-4))
 	}
 
@@ -647,21 +669,32 @@ func (m *ResultModel) viewResult(w, h int) string {
 	// Right: tree + scenarios
 	var right strings.Builder
 
+	// ── Winner's Lineage ──
+	right.WriteString(amberText.Bold(true).Render(" Winner's Lineage") + "\n")
+	right.WriteString(dim.Render(" score of the best agent across generations") + "\n\n")
+
+	tree := m.buildEvolutionTree(r, rightW-2)
+	right.WriteString(tree)
+
+	right.WriteString("\n")
+
+	// ── Population Health ──
 	totalSurvived := 0
 	totalEliminated := 0
 	for _, gen := range r.Generations {
 		totalSurvived += len(gen.Survivors)
 		totalEliminated += len(gen.Eliminated)
 	}
-	right.WriteString(amberText.Bold(true).Render(" Natural Selection") + "\n")
-	right.WriteString(fmt.Sprintf(" %s %d survived  %s %d eliminated\n",
+	right.WriteString(amberText.Bold(true).Render(" Population") + "\n")
+	right.WriteString(fmt.Sprintf(" %s %d survived  %s %d eliminated  ",
 		greenText.Render("▲"), totalSurvived,
 		dim.Render("▼"), totalEliminated))
+	right.WriteString(dim.Render(fmt.Sprintf("over %d gens", len(r.Generations))) + "\n")
 
 	// Diversity sparkline
 	if len(r.Generations) > 0 {
-		right.WriteString(dim.Render(" diversity: "))
-		for _, gen := range r.Generations {
+		right.WriteString(dim.Render(" genetic diversity: "))
+		for i, gen := range r.Generations {
 			d := gen.Diversity
 			if d > 0.4 {
 				right.WriteString(greenText.Render("█"))
@@ -672,16 +705,15 @@ func (m *ResultModel) viewResult(w, h int) string {
 			} else {
 				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render("▁"))
 			}
+			_ = i
 		}
-		right.WriteString("\n")
+		right.WriteString(dim.Render("  high=diverse") + "\n")
 	}
 	right.WriteString("\n")
 
-	tree := m.buildEvolutionTree(r, rightW-2)
-	right.WriteString(tree)
-
-	right.WriteString("\n")
-	right.WriteString(cyanText.Bold(true).Render(" Scenarios") + "\n")
+	// ── Scenario Breakdown ──
+	right.WriteString(cyanText.Bold(true).Render(" Scenario Breakdown") + "\n")
+	right.WriteString(dim.Render(" how the winner scored on each test scenario") + "\n\n")
 	if len(r.FinalScores) > 0 {
 		var best *AgentScore
 		for i := range r.FinalScores {
@@ -737,14 +769,14 @@ func (m *ResultModel) viewResult(w, h int) string {
 				if worstIdx < len(r.ScenarioNames) {
 					worstName = r.ScenarioNames[worstIdx]
 				}
-				if len(bestName) > rightW-14 {
-					bestName = bestName[:rightW-15] + "…"
+				if len(bestName) > rightW-20 {
+					bestName = bestName[:rightW-21] + "…"
 				}
-				if len(worstName) > rightW-14 {
-					worstName = worstName[:rightW-15] + "…"
+				if len(worstName) > rightW-20 {
+					worstName = worstName[:rightW-21] + "…"
 				}
-				right.WriteString(greenText.Render(" ✦ ") + softText.Render(bestName) + "\n")
-				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render(" ○ ") + softText.Render(worstName) + "\n")
+				right.WriteString(greenText.Render(" ✦ strongest: ") + softText.Render(bestName) + "\n")
+				right.WriteString(lg.NewStyle().Foreground(lg.Color("#FF5555")).Render(" ○ weakest:   ") + softText.Render(worstName) + "\n")
 			}
 		}
 	}
@@ -848,9 +880,10 @@ func (m *ResultModel) buildEvolutionTree(r *EvolutionResult, w int) string {
 			if isLast {
 				marker = goldText.Render("★")
 			}
-			b.WriteString(fmt.Sprintf("%s %s %s %.0f%% %s\n",
-				connector, marker, bar, winner.Overall*100,
-				dim.Render(fmt.Sprintf("+%d", others))))
+			genLabel := dim.Render(fmt.Sprintf("G%d ", gen))
+			b.WriteString(fmt.Sprintf("%s %s %s%s %.0f%% %s\n",
+				connector, marker, genLabel, bar, winner.Overall*100,
+				dim.Render(fmt.Sprintf("(%d agents)", len(agents)))))
 		} else {
 			b.WriteString(fmt.Sprintf("%s %s\n", connector,
 				dim.Render(fmt.Sprintf("G%d (%d agents)", gen, len(agents)))))
@@ -969,7 +1002,7 @@ func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
 	// Parse block markers: >>>\n...\n<<< for agent, <<<Name\n...\n<<< for counterparty
 	var result strings.Builder
 	bar := lg.NewStyle().Foreground(purple).Render("  ┃ ")
-	agentLabel := lg.NewStyle().Foreground(purple).Bold(true).Render("  agent")
+	defaultAgentLabel := lg.NewStyle().Foreground(purple).Bold(true).Render("  agent")
 
 	blocks := strings.Split(raw, "<<<\n")
 
@@ -980,10 +1013,20 @@ func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
 		}
 
 		if strings.HasPrefix(block, ">>>") {
-			// Agent message
-			content := strings.TrimPrefix(block, ">>>")
-			content = strings.TrimSpace(content)
-			result.WriteString("\n" + agentLabel + "\n")
+			raw := strings.TrimPrefix(block, ">>>")
+			// First line is agent name, rest is content
+			parts := strings.SplitN(raw, "\n", 2)
+			agentName := strings.TrimSpace(parts[0])
+			content := ""
+			if len(parts) > 1 {
+				content = strings.TrimSpace(parts[1])
+			}
+			label := defaultAgentLabel
+			if agentName != "" {
+				label = lg.NewStyle().Foreground(purple).Bold(true).Render("  "+agentName) +
+					dim.Render(" (agent)")
+			}
+			result.WriteString("\n" + label + "\n")
 			wrapped := m.wordWrap(content, maxWidth-6)
 			for _, wl := range strings.Split(wrapped, "\n") {
 				if wl != "" {
@@ -1011,10 +1054,17 @@ func (m *ResultModel) styleDetailView(raw string, maxWidth int) string {
 				}
 			}
 		} else {
-			// System message (generation markers etc)
+			// System message (generation markers, chat ended, etc)
 			for _, line := range strings.Split(block, "\n") {
 				line = strings.TrimSpace(line)
-				if line != "" {
+				if line == "" {
+					continue
+				}
+				if strings.Contains(line, "chat ended") {
+					result.WriteString("\n" + softText.Render("  "+line) + "\n")
+				} else if strings.Contains(line, "Gen ") || strings.Contains(line, "Generation") {
+					result.WriteString("\n" + amberText.Render("  "+line) + "\n")
+				} else {
 					result.WriteString("\n" + dim.Render("  "+line) + "\n")
 				}
 			}

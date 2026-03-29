@@ -67,20 +67,30 @@ Choose the right topology for each scenario:
 - Panel interactions (interviews, pitches to a committee) → rooms with multiple counterparties
 - Group dynamics (team mediation, classroom) → rooms with multiple counterparties
 
+CRITICAL RULES FOR THE TEMPLATE:
+- The template is shared by ALL agents (both the evolved agent and counterparties).
+- The template must NEVER say "you are the buyer" or "you are the seller" — each \
+  agent's role is defined entirely by their persona field.
+- The template should set the SCENE (what situation this is, what's at stake) but \
+  leave the agent's specific role to {{persona}}.
+- The template MUST contain {{persona}} exactly once.
+- The template MUST end with: "IMPORTANT: Keep every message to 1-3 sentences. No \
+  essays, no bullet points, no markdown. Talk naturally like a person in a live chat."
+
 Return ONLY valid JSON — an array of scenario objects:
 [
   {{
     "_scenario": "one-line description (e.g. 'Salary negotiation for a senior engineer role')",
-    "template": "You are in a conversation. [Specific situation, stakes, what both sides want.] Your approach: {{persona}} Use send_to_group to communicate. Write short, direct chat messages — no emails, no letters, no signatures, no JSON. Talk like a person in a live chat.",
+    "template": "You are in a live chat about [neutral scene description — what's happening, what's at stake, WITHOUT assigning a role]. Your role and goals: {{persona}} IMPORTANT: Keep every message to 1-3 sentences. No essays, no bullet points, no markdown. Talk naturally like a person in a live chat.",
     "topology": <topology object>,
-    "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
-    "num_rounds": 4,
+    "actions": ["SEND_TO_GROUP"],
+    "num_rounds": 5,
     "counterparties": [
       {{
         "username": "short_snake_case",
         "name": "Full Name",
-        "bio": "One-line role",
-        "persona": "Who they are, what they want, how they behave, their limits. 3-5 sentences."
+        "bio": "One-line role (e.g. 'Used car seller')",
+        "persona": "MUST start with the agent's specific role (e.g. 'You are the seller of a 2019 Honda Civic...'). Then: what they want, how they behave, their limits. 3-5 sentences."
       }}
     ]
   }}
@@ -573,12 +583,16 @@ class Orchestrator:
 
     # ── Scenario building ────────────────────────────────────────────────
 
+    _AGENT_NAMES = ["Jordan", "Morgan", "Casey", "Riley", "Quinn", "Avery",
+                    "Parker", "Sage", "Reese", "Finley", "Rowan", "Blake"]
+
     def _build_generation_scenario(self, base_scenario, population, generation, scenario_idx):
         scenario = dict(base_scenario)
         scenario["negotiators"] = [
-            {"username": f"agent_{g.genome_id}", "name": f"Agent {g.genome_id}",
+            {"username": f"agent_{g.genome_id}",
+             "name": self._AGENT_NAMES[i % len(self._AGENT_NAMES)],
              "bio": f"Evolved agent, gen {generation}", "persona": g.to_prompt()}
-            for g in population
+            for i, g in enumerate(population)
         ]
         gen_dir = os.path.join(self.run_dir, f"gen_{generation}")
         os.makedirs(gen_dir, exist_ok=True)
