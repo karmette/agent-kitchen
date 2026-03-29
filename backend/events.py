@@ -20,7 +20,7 @@ def emit(event: dict):
 
 
 async def poll_messages(db_path: str, agents_spec: list, stop_event: asyncio.Event,
-                        generation: int = 0):
+                        generation: int = 0, scenario_id: int = 0):
     """Poll the DB for new messages and emit them in real time.
 
     Runs concurrently with the simulation. Checks for new group_messages
@@ -70,6 +70,7 @@ async def poll_messages(db_path: str, agents_spec: list, stop_event: asyncio.Eve
                 emit({
                     "type": "message",
                     "generation": generation,
+                    "scenario_id": scenario_id,
                     "message_id": row["message_id"],
                     "group": group_names.get(row["group_id"], f"group_{row['group_id']}"),
                     "group_id": row["group_id"],

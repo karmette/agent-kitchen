@@ -3,13 +3,10 @@
 Evolves the best AI agent for any social interaction scenario through
 natural selection inside OASIS simulations.
 
-Features:
-  - LLM-generated scenarios and seed populations
-  - Multi-eval scoring for reliable fitness signals
-  - Elitism: all-time best genome always survives
-  - Diversity tracking: detects convergence, injects fresh genomes
-  - Scenario validation: retries invalid LLM-generated configs
-  - Checkpointing: crashed runs can resume from last completed generation
+The user provides only a goal (e.g. "make the best negotiator"). The system
+generates multiple diverse scenarios, a rubric, and an initial population.
+Each generation, every agent runs through ALL scenarios. Fitness = average
+score across scenarios. This produces generalist agents, not specialists.
 """
 
 import asyncio
@@ -25,85 +22,121 @@ from genome import AgentGenome
 from mutator import Mutator
 from main import run_scenario
 from evaluator.evaluate import evaluate_generation
-from llm import create_client, get_model, complete_json
+from llm import create_client, get_model, complete, complete_json
 from events import emit
 
 logger = logging.getLogger(__name__)
 
-
-def log(msg: str):
-    """Print to stderr (human-readable, not for Go TUI)."""
-    print(msg, file=sys.stderr)
-
 VALID_TOPOLOGY_MODES = {"pairwise", "rooms", "custom"}
 VALID_PER_VALUES = {"negotiator", "counterparty"}
 VALID_MEMBER_TYPES = {"negotiator", "counterparty", "all_negotiators", "all_counterparties"}
-DIVERSITY_THRESHOLD = 0.3  # below this, population is too similar
+DIVERSITY_THRESHOLD = 0.3
 SCENARIO_GEN_RETRIES = 3
+NUM_SCENARIOS = 3  # each cell in the TUI = one scenario
+
+
+def log(msg: str):
+    print(msg, file=sys.stderr)
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
-SCENARIO_GENERATION_PROMPT = """\
-You are designing a simulation scenario for an AI agent evolution system.
+SCENARIOS_GENERATION_PROMPT = """\
+You are designing simulation scenarios for an AI agent evolution system.
 
 The user wants to evolve: {goal}
 
-Generate a complete scenario JSON for an OASIS social simulation. The scenario \
-must include counterparty agents that the evolved agents will interact with. \
-The counterparties should be challenging and diverse — they are the environment \
-that tests the evolved agents.
+Generate {num_scenarios} DIVERSE scenarios that test DIFFERENT aspects of \
+this skill. Each scenario should be a distinct situation with different \
+dynamics, stakes, and counterparty types.
 
-Return ONLY valid JSON with this exact structure:
-{{
-  "_scenario": "one-line description of the scenario",
-  "template": "System prompt template for all agents. Must include {{persona}} placeholder. Tell agents to use send_to_group to communicate.",
-  "topology": {{"mode": "pairwise"}},
-  "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
-  "num_rounds": <int, 4-8 depending on complexity>,
-  "counterparties": [
-    {{
-      "username": "short_snake_case",
-      "name": "Full Name",
-      "bio": "One-line role description",
-      "persona": "Detailed persona prompt. 3-5 sentences."
-    }}
-  ]
-}}
+For example, if the goal is "best negotiator", scenarios might be:
+- Salary negotiation with a hiring manager
+- Vendor contract negotiation with a procurement officer
+- Used car haggling with a dealership salesman
 
-Topology options (choose ONE):
-- 1v1 conversations: {{"mode": "pairwise"}}
-- Group with all counterparties: {{"mode": "rooms", "per": "negotiator", "members": ["negotiator", "all_counterparties"]}}
-- Single room everyone shares: {{"mode": "rooms", "per": "counterparty", "members": ["counterparty", "all_negotiators"]}}
+Each scenario must be CONCRETE — specific stakes, specific context, not \
+vague. Each scenario independently defines its own topology and counterparties.
 
-The "per" field MUST be the string "negotiator" or "counterparty".
-The "members" field MUST be a list of strings from: "negotiator", "counterparty", "all_negotiators", "all_counterparties".
+Return ONLY valid JSON — an array of scenario objects:
+[
+  {{
+    "_scenario": "one-line description (e.g. 'Salary negotiation for a senior engineer role')",
+    "template": "You are in a conversation. [Specific situation, stakes, what both sides want.] Your approach: {{persona}} Use send_to_group to communicate. Be direct.",
+    "topology": <topology object>,
+    "actions": ["SEND_TO_GROUP", "LISTEN_FROM_GROUP", "DO_NOTHING"],
+    "num_rounds": 4,
+    "counterparties": [
+      {{
+        "username": "short_snake_case",
+        "name": "Full Name",
+        "bio": "One-line role",
+        "persona": "Who they are, what they want, how they behave, their limits. 3-5 sentences."
+      }}
+    ]
+  }}
+]
 
-Create 3-5 diverse counterparties. Make them challenging but realistic.
+Topology options per scenario:
+- 1v1: {{"mode": "pairwise"}}
+- Panel (1 evolved agent + multiple counterparties): {{"mode": "rooms", "per": "negotiator", "members": ["negotiator", "all_counterparties"]}}
+- Shared room (all evolved agents + counterparties together): {{"mode": "rooms", "per": "counterparty", "members": ["counterparty", "all_negotiators"]}}
+
+The "per" field MUST be "negotiator" or "counterparty".
+The "members" MUST be a list from: "negotiator", "counterparty", "all_negotiators", "all_counterparties".
+
+Choose the topology that fits each scenario naturally. A 1v1 negotiation is \
+pairwise. An interview with a panel is rooms. Each scenario can be different.
+
+Keep all scenarios realistic and professional — everyday business, workplace, \
+or consumer situations. No hostage situations, warfare, or extreme scenarios. \
+Each scenario should have 1-2 counterparties maximum for speed.
+"""
+
+RUBRIC_GENERATION_PROMPT = """\
+You are designing an evaluation rubric for an AI agent evolution system.
+
+The user wants to evolve: {goal}
+
+The agent will be tested across these scenarios:
+{scenario_descriptions}
+
+Generate a rubric that an LLM judge will use to score the evolved agent's \
+performance. The rubric should be GENERAL enough to apply across all \
+scenarios, but SPECIFIC enough to distinguish good from bad performance.
+
+Have 3-5 criteria, each scored 0.0 to 1.0. For each criterion, describe \
+what 0.0 and 1.0 look like.
+
+Return ONLY the rubric text as markdown, no JSON wrapping.
 """
 
 SEED_GENOME_PROMPT = """\
-You are generating a diverse initial genome for an AI agent that will be \
-evolved through natural selection.
+You are generating a strategy profile for an AI agent that will compete \
+in social simulations and be evolved through natural selection.
 
 The agent's goal: {goal}
+
+The agent will face these scenarios:
+{scenario_descriptions}
 
 The agent will be evaluated by this rubric:
 {rubric}
 
-Generate a unique agent genome with these 6 sections. Be creative and specific. \
-Each section should be 2-4 sentences.
+Generate a unique agent profile with these 6 sections. Each section should \
+be 2-4 sentences of PRACTICAL, ACTIONABLE instructions. The agent must be \
+versatile enough to perform well across ALL scenarios, not just one.
 
 {diversity_hint}
 
 Return ONLY valid JSON:
 {{
-  "role": "Who the agent is — identity, background, expertise",
-  "goals": "What the agent is trying to achieve, in priority order",
-  "strategy": "High-level approach and philosophy",
-  "tactics": "Specific techniques and moves to employ",
-  "style": "Communication tone, personality, mannerisms",
-  "constraints": "Hard rules and boundaries the agent won't cross"
+  "role": "A realistic role with relevant expertise",
+  "goals": "Concrete objectives in priority order",
+  "strategy": "High-level approach that works across different situations",
+  "tactics": "Specific techniques to employ",
+  "style": "Communication tone and personality",
+  "constraints": "Hard rules and boundaries"
 }}
 """
 
@@ -111,120 +144,98 @@ Return ONLY valid JSON:
 # ── Validation ───────────────────────────────────────────────────────────────
 
 def validate_scenario(scenario: dict) -> list[str]:
-    """Validate a generated scenario. Returns list of error strings (empty = valid)."""
     errors = []
-
     if "template" not in scenario:
-        errors.append("Missing 'template' field")
+        errors.append("Missing 'template'")
     elif "{persona}" not in scenario.get("template", ""):
-        errors.append("Template must contain {persona} placeholder")
+        errors.append("Template must contain {persona}")
 
     if "counterparties" not in scenario:
-        errors.append("Missing 'counterparties' field")
+        errors.append("Missing 'counterparties'")
     elif not isinstance(scenario["counterparties"], list) or len(scenario["counterparties"]) == 0:
         errors.append("'counterparties' must be a non-empty list")
     else:
         for i, cp in enumerate(scenario["counterparties"]):
             for field in ("username", "name", "bio", "persona"):
                 if field not in cp or not isinstance(cp[field], str):
-                    errors.append(f"Counterparty {i} missing or invalid '{field}'")
+                    errors.append(f"Counterparty {i} missing '{field}'")
 
     topology = scenario.get("topology", {})
     mode = topology.get("mode")
     if mode not in VALID_TOPOLOGY_MODES:
-        errors.append(f"Invalid topology mode: {mode}. Must be one of {VALID_TOPOLOGY_MODES}")
-
+        errors.append(f"Invalid topology mode: {mode}")
     if mode == "rooms":
-        per = topology.get("per")
-        if per not in VALID_PER_VALUES:
-            errors.append(f"Invalid topology 'per': {per}. Must be one of {VALID_PER_VALUES}")
+        if topology.get("per") not in VALID_PER_VALUES:
+            errors.append(f"Invalid 'per': {topology.get('per')}")
         members = topology.get("members", [])
         if not isinstance(members, list):
-            errors.append(f"Topology 'members' must be a list, got {type(members)}")
+            errors.append("'members' must be a list")
         else:
             for m in members:
                 if m not in VALID_MEMBER_TYPES:
-                    errors.append(f"Invalid member type: {m}. Must be one of {VALID_MEMBER_TYPES}")
+                    errors.append(f"Invalid member: {m}")
 
     if not isinstance(scenario.get("num_rounds", 0), int) or scenario.get("num_rounds", 0) < 1:
         errors.append("'num_rounds' must be a positive integer")
-
     return errors
 
 
 # ── Diversity ────────────────────────────────────────────────────────────────
 
 def population_diversity(population: list[AgentGenome]) -> float:
-    """Measure population diversity as average pairwise dissimilarity (0-1).
-
-    0 = all identical, 1 = all completely different.
-    """
     if len(population) < 2:
         return 1.0
-
     prompts = [g.to_prompt() for g in population]
-    similarities = []
+    sims = []
     for i in range(len(prompts)):
         for j in range(i + 1, len(prompts)):
-            ratio = SequenceMatcher(None, prompts[i], prompts[j]).quick_ratio()
-            similarities.append(ratio)
-
-    avg_similarity = sum(similarities) / len(similarities)
-    return round(1.0 - avg_similarity, 3)
+            sims.append(SequenceMatcher(None, prompts[i], prompts[j]).quick_ratio())
+    return round(1.0 - sum(sims) / len(sims), 3)
 
 
 # ── Checkpointing ────────────────────────────────────────────────────────────
 
-def save_checkpoint(run_dir: str, generation: int, population: list[AgentGenome],
-                    best_genome: AgentGenome, best_score: float, scenario: dict):
-    """Save checkpoint so a crashed run can resume."""
-    checkpoint = {
-        "generation": generation,
+def save_checkpoint(run_dir, gen, population, best_genome, best_score, scenarios, rubric):
+    data = {
+        "generation": gen,
         "best_genome_id": best_genome.genome_id if best_genome else None,
         "best_score": best_score,
         "population": [g.to_dict() for g in population],
-        "scenario": scenario,
+        "scenarios": scenarios,
+        "rubric": rubric,
     }
-    path = os.path.join(run_dir, "checkpoint.json")
-    with open(path, "w") as f:
-        json.dump(checkpoint, f, indent=2)
+    with open(os.path.join(run_dir, "checkpoint.json"), "w") as f:
+        json.dump(data, f, indent=2)
 
 
-def load_checkpoint(run_dir: str):
-    """Load checkpoint if it exists. Returns (generation, population, best_genome, best_score, scenario) or None."""
+def load_checkpoint(run_dir):
     path = os.path.join(run_dir, "checkpoint.json")
     if not os.path.exists(path):
         return None
     with open(path) as f:
         data = json.load(f)
     population = [AgentGenome.from_dict(g) for g in data["population"]]
-    best_genome = None
+    best = None
     if data["best_genome_id"]:
         for g in population:
             if g.genome_id == data["best_genome_id"]:
-                best_genome = g
+                best = g
                 break
-    return data["generation"], population, best_genome, data["best_score"], data["scenario"]
+    return (data["generation"], population, best, data["best_score"],
+            data["scenarios"], data.get("rubric", ""))
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
 
 class Orchestrator:
-    def __init__(
-        self,
-        goal: str,
-        rubric: str,
-        population_size: int = 8,
-        num_generations: int = 5,
-        survival_rate: float = 0.4,
-        model: str = None,
-        run_dir: str = None,
-    ):
+    def __init__(self, goal, rubric=None, population_size=8, num_generations=5,
+                 survival_rate=0.4, num_scenarios=NUM_SCENARIOS, model=None, run_dir=None):
         self.goal = goal
         self.rubric = rubric
         self.population_size = population_size
         self.num_generations = num_generations
         self.survival_rate = survival_rate
+        self.num_scenarios = num_scenarios
         self.model = model or get_model()
         self.client = create_client()
         self.mutator = Mutator(model=self.model)
@@ -237,11 +248,10 @@ class Orchestrator:
         os.makedirs(self.run_dir, exist_ok=True)
 
     async def run(self) -> AgentGenome:
-        """Run the full evolutionary loop. Returns the best genome."""
-        logger.info(f"Starting evolution: goal='{self.goal}', pop={self.population_size}, gens={self.num_generations}")
-
-        emit({"type": "evolution_start", "goal": self.goal, "population_size": self.population_size,
-              "num_generations": self.num_generations, "run_dir": self.run_dir})
+        emit({"type": "evolution_start", "goal": self.goal,
+              "population_size": self.population_size,
+              "num_generations": self.num_generations,
+              "num_scenarios": self.num_scenarios, "run_dir": self.run_dir})
 
         log(f"\n{'='*60}")
         log(f"  AGENT KITCHEN — Evolutionary Agent Optimization")
@@ -249,13 +259,13 @@ class Orchestrator:
         log(f"  Goal:        {self.goal}")
         log(f"  Population:  {self.population_size}")
         log(f"  Generations: {self.num_generations}")
+        log(f"  Scenarios:   {self.num_scenarios}")
         log(f"  Output:      {self.run_dir}")
         log(f"{'='*60}\n")
 
-        # Check for existing checkpoint
         checkpoint = load_checkpoint(self.run_dir)
         if checkpoint:
-            start_gen, population, best_genome, best_score, scenario = checkpoint
+            start_gen, population, best_genome, best_score, scenarios, self.rubric = checkpoint
             start_gen += 1
             log(f"  Resuming from generation {start_gen} (best={best_score:.2f})\n")
         else:
@@ -263,32 +273,42 @@ class Orchestrator:
             best_genome = None
             best_score = -1
 
-            # Step 1: Generate and validate scenario
-            log("[1/3] Generating scenario...")
-            scenario = await self._generate_scenario_with_validation()
-            self._save_json(scenario, "scenario_base.json")
-            emit({"type": "scenario_ready", "scenario": scenario.get("_scenario", ""),
-                  "num_counterparties": len(scenario["counterparties"]),
-                  "topology": scenario["topology"]["mode"]})
-            log(f"      Scenario: {scenario.get('_scenario', '?')}")
-            log(f"      Counterparties: {len(scenario['counterparties'])}")
-            log(f"      Topology: {scenario['topology']['mode']}")
+            # Step 1: Generate diverse scenarios
+            log("[1/4] Generating scenarios...")
+            scenarios = await self._generate_scenarios()
+            self._save_json(scenarios, "scenarios.json")
+            for i, s in enumerate(scenarios):
+                emit({"type": "scenario_ready", "scenario_id": i,
+                      "scenario": s.get("_scenario", ""),
+                      "topology": s["topology"]["mode"],
+                      "num_counterparties": len(s["counterparties"])})
+                log(f"      [{i+1}] {s.get('_scenario', '?')} ({s['topology']['mode']}, {len(s['counterparties'])} counterparties)")
 
-            # Step 2: Generate initial population (parallel)
-            log(f"\n[2/3] Generating initial population of {self.population_size}...")
-            population = await self._generate_initial_population()
-            for i, genome in enumerate(population):
-                genome.save(os.path.join(self.run_dir, "gen_0"))
-                log(f"      [{i+1}] {genome.role[:60]}...")
+            # Step 2: Generate rubric
+            if not self.rubric:
+                log("\n[2/4] Generating evaluation rubric...")
+                descs = "\n".join(f"- {s['_scenario']}" for s in scenarios)
+                self.rubric = await self._generate_rubric(descs)
+                log(f"      {self.rubric[:100]}...")
+            else:
+                log("\n[2/4] Using provided rubric")
+            self._save_json({"rubric": self.rubric}, "rubric.json")
+
+            # Step 3: Generate initial population
+            descs = "\n".join(f"- {s['_scenario']}" for s in scenarios)
+            log(f"\n[3/4] Generating initial population of {self.population_size}...")
+            population = await self._generate_initial_population(descs)
+            for i, g in enumerate(population):
+                g.save(os.path.join(self.run_dir, "gen_0"))
+                log(f"      [{i+1}] {g.role[:60]}...")
 
             emit({"type": "population_ready", "size": len(population),
                   "genomes": [{"genome_id": g.genome_id, "role": g.role[:80]} for g in population]})
-            log(f"\n[3/3] Starting evolution...\n")
+            log(f"\n[4/4] Starting evolution...\n")
 
-        # Evolution loop
+        # ── Evolution loop ───────────────────────────────────────────────
         for gen in range(start_gen, self.num_generations):
             diversity = population_diversity(population)
-
             emit({"type": "generation_start", "generation": gen, "diversity": diversity})
             log(f"\n{'─'*60}")
             log(f"  GENERATION {gen}")
@@ -297,88 +317,104 @@ class Orchestrator:
 
             if diversity < DIVERSITY_THRESHOLD:
                 log(f"  LOW — injecting fresh genomes")
-                population = await self._inject_diversity(population, gen)
+                descs = "\n".join(f"- {s['_scenario']}" for s in scenarios)
+                population = await self._inject_diversity(population, gen, descs)
 
-            # Build scenario with current genomes as negotiators
-            scenario_path = self._build_generation_scenario(scenario, population, gen)
-            db_path = os.path.join(self.run_dir, f"gen_{gen}", "simulation.db")
-            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            # Run ALL scenarios in parallel
+            async def run_one_scenario(scenario_idx, scenario):
+                scenario_name = scenario.get("_scenario", f"Scenario {scenario_idx}")
+                log(f"\n  Scenario {scenario_idx}: {scenario_name}")
 
-            # Run OASIS simulation (messages stream to stdout in real time via poller)
-            log(f"\n  Running simulation...")
-            db_path, agents_spec = await run_scenario(scenario_path, db_path, generation=gen)
+                scenario_path = self._build_generation_scenario(
+                    scenario, population, gen, scenario_idx)
+                db_path = os.path.join(
+                    self.run_dir, f"gen_{gen}", f"scenario_{scenario_idx}.db")
+                os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-            # Evaluate (multi-eval for reliability)
-            emit({"type": "evaluation_start", "generation": gen})
-            log(f"\n  Evaluating (3x per agent for reliability)...")
-            scores = await evaluate_generation(
-                db_path=db_path,
-                agents_spec=agents_spec,
-                rubric=self.rubric,
-                model=self.model,
+                emit({"type": "scenario_start", "generation": gen,
+                      "scenario_id": scenario_idx, "scenario": scenario_name})
+
+                db_path, agents_spec = await run_scenario(
+                    scenario_path, db_path, generation=gen, scenario_id=scenario_idx)
+
+                emit({"type": "evaluation_start", "generation": gen,
+                      "scenario_id": scenario_idx})
+                log(f"    Evaluating scenario {scenario_idx}...")
+                scores = await evaluate_generation(
+                    db_path=db_path, agents_spec=agents_spec,
+                    rubric=self.rubric, model=self.model)
+
+                return scenario_idx, scores
+
+            scenario_results = await asyncio.gather(
+                *[run_one_scenario(i, s) for i, s in enumerate(scenarios)],
+                return_exceptions=True,
             )
-            for src_idx, result in scores.items():
-                genome = population[src_idx]
-                overall = result.get("overall", 0.0)
-                spread = result.get("_eval_spread", 0)
-                emit({"type": "score", "generation": gen, "genome_id": genome.genome_id,
-                      "overall": overall, "scores": result.get("scores", {}),
-                      "reasoning": result.get("reasoning", ""), "eval_spread": spread})
-                spread_str = f" spread={spread:.2f}" if spread else ""
-                log(f"    [{genome.genome_id}] score={overall:.2f}{spread_str} — {result.get('reasoning', '')[:70]}")
 
-            # Save generation results
+            all_scores = {}
+            for src_idx in range(len(population)):
+                all_scores[src_idx] = []
+
+            for result in scenario_results:
+                if isinstance(result, Exception):
+                    logger.error(f"Scenario failed: {result}")
+                    continue  # skip failed scenarios entirely
+                scenario_idx, scores = result
+                for src_idx, score_result in scores.items():
+                    all_scores[src_idx].append(score_result.get("overall", 0.0))
+
+            # Aggregate: average score across completed scenarios only
+            agg_scores = {}
+            for src_idx in range(len(population)):
+                scenario_scores = [s for s in all_scores.get(src_idx, []) if s > 0.0]
+                avg = sum(scenario_scores) / len(scenario_scores) if scenario_scores else 0.0
+                agg_scores[src_idx] = round(avg, 3)
+                genome = population[src_idx]
+                emit({"type": "score", "generation": gen, "genome_id": genome.genome_id,
+                      "overall": agg_scores[src_idx],
+                      "scenario_scores": scenario_scores})
+                log(f"    [{genome.genome_id}] avg={agg_scores[src_idx]:.2f} scenarios={scenario_scores}")
+
             self._save_json({
-                "generation": gen,
-                "diversity": diversity,
-                "scores": {str(k): v for k, v in scores.items()},
+                "generation": gen, "diversity": diversity,
+                "scores": {str(k): {"overall": v, "scenarios": all_scores[k]}
+                           for k, v in agg_scores.items()},
             }, f"gen_{gen}/scores.json")
 
             # Track best (elitism)
-            for src_idx, result in scores.items():
-                overall = result.get("overall", 0.0)
-                if overall > best_score:
-                    best_score = overall
+            for src_idx, avg in agg_scores.items():
+                if avg > best_score:
+                    best_score = avg
                     best_genome = population[src_idx]
-                    logger.info(f"New best: {best_genome.genome_id} score={best_score:.3f}")
 
-            # Select top performers
-            ranked = sorted(
-                range(len(population)),
-                key=lambda i: scores.get(i, {}).get("overall", 0.0),
-                reverse=True,
-            )
+            # Select
+            ranked = sorted(range(len(population)),
+                            key=lambda i: agg_scores.get(i, 0.0), reverse=True)
             num_survivors = max(1, int(self.population_size * self.survival_rate))
             survivors = [population[i] for i in ranked[:num_survivors]]
 
-            # Elitism: ensure all-time best is always in survivors
             if best_genome and best_genome.genome_id not in [s.genome_id for s in survivors]:
                 survivors[-1] = best_genome
-                log(f"  Elitism: preserved all-time best [{best_genome.genome_id}]")
+                log(f"  Elitism: preserved [{best_genome.genome_id}]")
 
-            survivor_ids = [s.genome_id for s in survivors]
-            eliminated_ids = [population[i].genome_id for i in ranked[num_survivors:]]
             emit({"type": "selection", "generation": gen,
-                  "survivors": survivor_ids, "eliminated": eliminated_ids,
+                  "survivors": [s.genome_id for s in survivors],
+                  "eliminated": [population[i].genome_id for i in ranked[num_survivors:]],
                   "best_genome_id": best_genome.genome_id, "best_score": best_score})
 
             log(f"\n  Selection: top {num_survivors} survive")
             for i, idx in enumerate(ranked[:num_survivors]):
-                s = scores.get(idx, {}).get("overall", 0.0)
                 marker = " *" if population[idx].genome_id == best_genome.genome_id else ""
-                log(f"    {i+1}. [{population[idx].genome_id}] score={s:.2f}{marker}")
+                log(f"    {i+1}. [{population[idx].genome_id}] avg={agg_scores[idx]:.2f}{marker}")
 
-            # Checkpoint
-            save_checkpoint(self.run_dir, gen, population, best_genome, best_score, scenario)
-
+            save_checkpoint(self.run_dir, gen, population, best_genome, best_score, scenarios, self.rubric)
             emit({"type": "generation_complete", "generation": gen,
                   "best_score": best_score, "diversity": diversity})
 
-            # Evolve next generation (unless final)
             if gen < self.num_generations - 1:
                 population = await self._evolve(survivors, gen + 1)
-                for genome in population:
-                    genome.save(os.path.join(self.run_dir, f"gen_{gen + 1}"))
+                for g in population:
+                    g.save(os.path.join(self.run_dir, f"gen_{gen + 1}"))
                 log(f"\n  Next generation: {len(population)} agents")
 
         # Final results
@@ -393,173 +429,138 @@ class Orchestrator:
 
         best_genome.save(os.path.join(self.run_dir, "best"))
         self._save_json({
-            "best_genome_id": best_genome.genome_id,
-            "best_score": best_score,
-            "best_prompt": best_genome.to_prompt(),
-            "goal": self.goal,
-            "rubric": self.rubric,
+            "best_genome_id": best_genome.genome_id, "best_score": best_score,
+            "best_prompt": best_genome.to_prompt(), "goal": self.goal, "rubric": self.rubric,
         }, "results.json")
 
         emit({"type": "evolution_complete", "best_genome_id": best_genome.genome_id,
               "best_score": best_score, "best_prompt": best_genome.to_prompt(),
               "run_dir": self.run_dir})
-
         return best_genome
 
-    # ── Scenario generation with validation ──────────────────────────────
+    # ── Scenario generation ──────────────────────────────────────────────
 
-    async def _generate_scenario_with_validation(self) -> dict:
-        """Generate a scenario, validating and retrying on failure."""
-        prompt = SCENARIO_GENERATION_PROMPT.format(goal=self.goal)
+    async def _generate_scenarios(self) -> list[dict]:
+        prompt = SCENARIOS_GENERATION_PROMPT.format(
+            goal=self.goal, num_scenarios=self.num_scenarios)
 
         for attempt in range(SCENARIO_GEN_RETRIES):
-            scenario = await complete_json(self.client, self.model, prompt, temperature=0.8)
-            errors = validate_scenario(scenario)
-            if not errors:
-                return scenario
-            logger.warning(f"Scenario validation failed (attempt {attempt + 1}): {errors}")
-            # Add errors to prompt for next attempt
-            prompt = SCENARIO_GENERATION_PROMPT.format(goal=self.goal) + (
-                f"\n\nYour previous attempt had these errors: {errors}\nPlease fix them."
-            )
+            result = await complete_json(self.client, self.model, prompt, temperature=0.8)
 
-        # Last resort: use a safe pairwise default
-        logger.error("Scenario generation failed after retries, fixing topology to pairwise")
-        scenario["topology"] = {"mode": "pairwise"}
-        remaining_errors = validate_scenario(scenario)
-        if remaining_errors:
-            raise ValueError(f"Cannot generate valid scenario: {remaining_errors}")
-        return scenario
+            # Handle both array and wrapped object
+            if isinstance(result, list):
+                scenarios = result
+            elif isinstance(result, dict) and "scenarios" in result:
+                scenarios = result["scenarios"]
+            else:
+                scenarios = [result]
 
-    # ── Population generation (parallel) ─────────────────────────────────
+            # Validate each
+            all_valid = True
+            for i, s in enumerate(scenarios):
+                errors = validate_scenario(s)
+                if errors:
+                    logger.warning(f"Scenario {i} invalid (attempt {attempt+1}): {errors}")
+                    all_valid = False
 
-    async def _generate_initial_population(self) -> list[AgentGenome]:
-        """Generate a diverse initial population of genomes in parallel."""
+            if all_valid and len(scenarios) >= 1:
+                return scenarios[:self.num_scenarios]
 
-        async def generate_one(diversity_hint: str) -> AgentGenome:
+            prompt = SCENARIOS_GENERATION_PROMPT.format(
+                goal=self.goal, num_scenarios=self.num_scenarios) + (
+                f"\n\nYour previous attempt had errors. Return a valid JSON array.")
+
+        raise ValueError("Failed to generate valid scenarios after retries")
+
+    async def _generate_rubric(self, scenario_descriptions: str) -> str:
+        prompt = RUBRIC_GENERATION_PROMPT.format(
+            goal=self.goal, scenario_descriptions=scenario_descriptions)
+        return await complete(self.client, self.model, prompt, temperature=0.5)
+
+    # ── Population generation ────────────────────────────────────────────
+
+    async def _generate_initial_population(self, scenario_descriptions: str) -> list[AgentGenome]:
+        async def gen_one(hint):
             prompt = SEED_GENOME_PROMPT.format(
-                goal=self.goal, rubric=self.rubric, diversity_hint=diversity_hint,
-            )
+                goal=self.goal, rubric=self.rubric,
+                scenario_descriptions=scenario_descriptions, diversity_hint=hint)
             data = await complete_json(self.client, self.model, prompt, temperature=1.0)
             return AgentGenome(
-                role=data.get("role", ""),
-                goals=data.get("goals", ""),
-                strategy=data.get("strategy", ""),
-                tactics=data.get("tactics", ""),
-                style=data.get("style", ""),
-                constraints=data.get("constraints", ""),
-                generation=0,
-            )
+                role=data.get("role", ""), goals=data.get("goals", ""),
+                strategy=data.get("strategy", ""), tactics=data.get("tactics", ""),
+                style=data.get("style", ""), constraints=data.get("constraints", ""),
+                generation=0)
 
-        # Generate first genome, then use it as diversity reference for the rest
-        first = await generate_one("This is the first agent. Be creative.")
-        population = [first]
-
-        # Generate remaining in parallel
-        hints = []
-        for i in range(1, self.population_size):
-            hints.append(
-                f"Make this agent DIFFERENT from existing agents.\n"
-                f"Agent 0 strategy: {first.strategy[:80]}\n"
-                f"Try approach #{i+1} — be creative and divergent."
-            )
-
-        tasks = [generate_one(hint) for hint in hints]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning(f"Seed generation failed: {result}, retrying")
-                fallback = await generate_one("Be creative. Generate a unique approach.")
-                population.append(fallback)
+        first = await gen_one("This is the first agent. Be creative and practical.")
+        pop = [first]
+        hints = [f"Be DIFFERENT from: {first.strategy[:80]}. Try approach #{i+1}."
+                 for i in range(1, self.population_size)]
+        results = await asyncio.gather(*[gen_one(h) for h in hints], return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning(f"Seed gen failed: {r}")
+                pop.append(await gen_one("Use a unique, practical approach."))
             else:
-                population.append(result)
-
-        return population
+                pop.append(r)
+        return pop
 
     # ── Evolution ────────────────────────────────────────────────────────
 
-    async def _evolve(self, survivors: list[AgentGenome], generation: int) -> list[AgentGenome]:
-        """Create next generation from survivors via mutation and crossover."""
+    async def _evolve(self, survivors, generation):
         next_gen = list(survivors)
-        num_needed = self.population_size - len(next_gen)
-
         tasks = []
-        for _ in range(num_needed):
+        for _ in range(self.population_size - len(next_gen)):
             if len(survivors) >= 2 and random.random() < 0.3:
                 a, b = random.sample(survivors, 2)
                 tasks.append(self.mutator.crossover(a, b, generation))
             else:
-                parent = random.choice(survivors)
-                tasks.append(self.mutator.mutate(parent, generation))
-
+                tasks.append(self.mutator.mutate(random.choice(survivors), generation))
         children = await asyncio.gather(*tasks, return_exceptions=True)
         for child in children:
             if isinstance(child, Exception):
-                logger.warning(f"Mutation failed: {child}, cloning survivor")
-                fallback = random.choice(survivors)
-                clone = AgentGenome(**fallback.sections(), generation=generation, parent_ids=[fallback.genome_id])
-                next_gen.append(clone)
+                f = random.choice(survivors)
+                next_gen.append(AgentGenome(**f.sections(), generation=generation,
+                                            parent_ids=[f.genome_id]))
             else:
                 next_gen.append(child)
-
         return next_gen[:self.population_size]
 
-    async def _inject_diversity(self, population: list[AgentGenome], generation: int) -> list[AgentGenome]:
-        """Replace the weakest members with fresh random genomes when diversity is low."""
-        num_inject = max(1, self.population_size // 4)
-        logger.info(f"Injecting {num_inject} fresh genomes for diversity")
-
-        tasks = []
-        for _ in range(num_inject):
-            prompt = SEED_GENOME_PROMPT.format(
-                goal=self.goal, rubric=self.rubric,
-                diversity_hint="The population has converged. Generate a RADICALLY different approach.",
-            )
-            tasks.append(complete_json(self.client, self.model, prompt, temperature=1.2))
-
+    async def _inject_diversity(self, population, generation, scenario_descriptions):
+        n = max(1, self.population_size // 4)
+        tasks = [complete_json(self.client, self.model, SEED_GENOME_PROMPT.format(
+            goal=self.goal, rubric=self.rubric,
+            scenario_descriptions=scenario_descriptions,
+            diversity_hint="Population converged. Generate a RADICALLY different approach."),
+            temperature=1.2) for _ in range(n)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-
         fresh = []
-        for result in results:
-            if isinstance(result, Exception):
+        for r in results:
+            if isinstance(r, Exception):
                 continue
             fresh.append(AgentGenome(
-                role=result.get("role", ""),
-                goals=result.get("goals", ""),
-                strategy=result.get("strategy", ""),
-                tactics=result.get("tactics", ""),
-                style=result.get("style", ""),
-                constraints=result.get("constraints", ""),
-                generation=generation,
-            ))
+                role=r.get("role", ""), goals=r.get("goals", ""),
+                strategy=r.get("strategy", ""), tactics=r.get("tactics", ""),
+                style=r.get("style", ""), constraints=r.get("constraints", ""),
+                generation=generation))
+        return population[:len(population) - len(fresh)] + fresh
 
-        # Replace the last N members (weakest after sorting)
-        new_pop = population[:len(population) - len(fresh)] + fresh
-        return new_pop
+    # ── Scenario building ────────────────────────────────────────────────
 
-    # ── Scenario building per generation ─────────────────────────────────
-
-    def _build_generation_scenario(self, base_scenario: dict, population: list[AgentGenome], generation: int) -> str:
+    def _build_generation_scenario(self, base_scenario, population, generation, scenario_idx):
         scenario = dict(base_scenario)
         scenario["negotiators"] = [
-            {
-                "username": f"agent_{genome.genome_id}",
-                "name": f"Agent {genome.genome_id}",
-                "bio": f"Evolved agent, generation {generation}",
-                "persona": genome.to_prompt(),
-            }
-            for genome in population
+            {"username": f"agent_{g.genome_id}", "name": f"Agent {g.genome_id}",
+             "bio": f"Evolved agent, gen {generation}", "persona": g.to_prompt()}
+            for g in population
         ]
-
         gen_dir = os.path.join(self.run_dir, f"gen_{generation}")
         os.makedirs(gen_dir, exist_ok=True)
-        path = os.path.join(gen_dir, "scenario.json")
+        path = os.path.join(gen_dir, f"scenario_{scenario_idx}.json")
         with open(path, "w") as f:
             json.dump(scenario, f, indent=2)
         return path
 
-    def _save_json(self, data: dict, filename: str):
+    def _save_json(self, data, filename):
         path = os.path.join(self.run_dir, filename)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
@@ -570,38 +571,29 @@ class Orchestrator:
 
 def main():
     import argparse
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stderr,
-    )
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 
     parser = argparse.ArgumentParser(description="Agent Kitchen: Evolve the perfect AI agent")
-    parser.add_argument("goal", help="What kind of agent to evolve")
-    parser.add_argument("--rubric", required=True, help="Path to rubric text file")
+    parser.add_argument("goal")
+    parser.add_argument("--rubric", default=None)
     parser.add_argument("--population", type=int, default=8)
     parser.add_argument("--generations", type=int, default=5)
+    parser.add_argument("--scenarios", type=int, default=NUM_SCENARIOS)
     parser.add_argument("--survival-rate", type=float, default=0.4)
-    parser.add_argument("--model", default=None, help="LLM model override")
-    parser.add_argument("--resume", default=None, help="Path to existing run directory to resume")
+    parser.add_argument("--model", default=None)
+    parser.add_argument("--resume", default=None)
     args = parser.parse_args()
 
-    with open(args.rubric) as f:
-        rubric = f.read()
+    rubric = None
+    if args.rubric:
+        with open(args.rubric) as f:
+            rubric = f.read()
 
-    orchestrator = Orchestrator(
-        goal=args.goal,
-        rubric=rubric,
-        population_size=args.population,
-        num_generations=args.generations,
-        survival_rate=args.survival_rate,
-        model=args.model,
-        run_dir=args.resume,
-    )
-
-    asyncio.run(orchestrator.run())
+    o = Orchestrator(goal=args.goal, rubric=rubric, population_size=args.population,
+                     num_generations=args.generations, num_scenarios=args.scenarios,
+                     survival_rate=args.survival_rate, model=args.model, run_dir=args.resume)
+    asyncio.run(o.run())
 
 
 if __name__ == "__main__":

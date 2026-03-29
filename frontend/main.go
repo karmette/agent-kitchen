@@ -48,17 +48,26 @@ func (m RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cells := m.input.GetCells()
 			iterations := m.input.GetIterations()
 			m.state = resultView
-			cols := int(math.Ceil(math.Sqrt(float64(cells))))
-			rows := int(math.Ceil(float64(cells) / float64(cols)))
+			// Layout: prefer no empty slots
+			var rows, cols int
+			if cells <= 4 {
+				// Single row for small counts
+				cols = cells
+				rows = 1
+			} else {
+				cols = int(math.Ceil(math.Sqrt(float64(cells))))
+				rows = int(math.Ceil(float64(cells) / float64(cols)))
+			}
 			if cols < 1 {
 				cols = 1
 			}
 			if rows < 1 {
 				rows = 1
 			}
-			m.result = NewResultModel(rows, cols, iterations)
+			m.result = NewResultModel(rows, cols, iterations, cells)
 			m.result.width = m.width
 			m.result.height = m.height
+			RunBackend(m.result.cells, m.prompt, iterations, cells)
 		}
 
 	case resultView:

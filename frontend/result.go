@@ -53,39 +53,40 @@ const (
 )
 
 type cell struct {
-	status  CellStatus
-	conv    conversation
-	content strings.Builder
+	status   CellStatus
+	conv     conversation
+	content  strings.Builder
+	scenario string // scenario name for this cell
 }
 type ViewMode int
 
 const (
 	ModeGrid ViewMode = iota
 	ModeDetail
+	ModeResult
 )
 
 type ResultModel struct {
-	content    string
-	rows       int
-	cols       int
-	iterations int
-	focusedRow int
-	focusedCol int
-	width      int
-	height     int
-	cells      []cell
-	mode       ViewMode // NEW: Track the current view mode
+	content      string
+	rows         int
+	cols         int
+	iterations   int
+	focusedRow   int
+	focusedCol   int
+	width        int
+	height       int
+	cells        []cell
+	mode         ViewMode
+	detailScroll int
+	resultScroll int
 }
 
-func NewResultModel(rows, cols, iterations int) *ResultModel {
-	totalCells := rows * cols
-
-	cells := make([]cell, totalCells)
+func NewResultModel(rows, cols, iterations, numCells int) *ResultModel {
+	cells := make([]cell, numCells)
 
 	for i := range cells {
 		cells[i].status = StatusPending
 		cells[i].conv = newConversation()
-		go cells[i].conv.start()
 	}
 	return &ResultModel{
 		content:    "",
@@ -122,18 +123,27 @@ func (m *ResultModel) Update(msg tea.Msg) tea.Cmd {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return tea.Quit
-			
-		// NEW: Mode switching keys
 		case "enter", "o":
 			if m.mode == ModeGrid {
-				m.mode = ModeDetail
+				idx := m.focusedRow*m.cols + m.focusedCol
+				if FinalResult != nil && m.allDone() {
+					m.mode = ModeResult
+					m.resultScroll = 0
+				} else if idx < len(m.cells) {
+					m.mode = ModeDetail
+					m.detailScroll = 0
+				}
+			}
+		case "r":
+			// Quick key to view results if available
+			if FinalResult != nil {
+				m.mode = ModeResult
+				m.resultScroll = 0
 			}
 		case "esc":
-			if m.mode == ModeDetail {
+			if m.mode == ModeDetail || m.mode == ModeResult {
 				m.mode = ModeGrid
 			}
-
-		// Wrap navigation in a check to ensure we only move in Grid mode
 		case "h", "left":
 			if m.mode == ModeGrid {
 				if m.focusedCol > 0 {
@@ -161,7 +171,11 @@ func (m *ResultModel) Update(msg tea.Msg) tea.Cmd {
 				}
 			}
 		case "k", "up":
-			if m.mode == ModeGrid {
+			if m.mode == ModeDetail {
+				m.detailScroll++
+			} else if m.mode == ModeResult {
+				m.resultScroll++
+			} else if m.mode == ModeGrid {
 				if m.focusedRow > 0 {
 					m.focusedRow--
 				} else {
@@ -169,7 +183,15 @@ func (m *ResultModel) Update(msg tea.Msg) tea.Cmd {
 				}
 			}
 		case "j", "down":
-			if m.mode == ModeGrid {
+			if m.mode == ModeDetail {
+				if m.detailScroll > 0 {
+					m.detailScroll--
+				}
+			} else if m.mode == ModeResult {
+				if m.resultScroll > 0 {
+					m.resultScroll--
+				}
+			} else if m.mode == ModeGrid {
 				if m.focusedRow < m.rows-1 {
 					m.focusedRow++
 				} else {
@@ -190,10 +212,24 @@ func (m *ResultModel) checkChannels() {
 		select {
 		case msg := <-m.cells[i].conv.ch:
 			m.cells[i].content.WriteString(msg)
+			if m.cells[i].content.Len() > 100000 {
+				s := m.cells[i].content.String()
+				m.cells[i].content.Reset()
+				m.cells[i].content.WriteString(s[len(s)-80000:])
+			}
+			if m.cells[i].status == StatusPending {
+				m.cells[i].status = StatusRunning
+			}
 		case <-m.cells[i].conv.done:
 			m.cells[i].status = StatusDone
 		default:
 		}
+	}
+
+	// Auto-switch to results only from grid view — don't interrupt detail view
+	if m.mode == ModeGrid && FinalResult != nil && m.allDone() {
+		m.mode = ModeResult
+		m.resultScroll = 0
 	}
 }
 
@@ -212,28 +248,86 @@ func (m *ResultModel) View() string {
 
 	sidePanelWidth := 30
 
+	containerStyle := resultContainer.Width(m.width).Height(m.height)
 	innerWidth := m.width - resultContainer.GetHorizontalFrameSize()
 	innerHeight := m.height - resultContainer.GetVerticalFrameSize()
-	// NEW: Detail View Rendering
 	if m.mode == ModeDetail {
 		idx := m.focusedRow*m.cols + m.focusedCol
-		
-		// Create a header for the detailed view
-		header := lg.NewStyle().
-			Foreground(lg.Color("#397fdb")).
-			Bold(true).
-			Render(fmt.Sprintf("--- Cell %d Chat (Press ESC to return) ---\n\n", idx+1))
+		if idx >= len(m.cells) {
+			return containerStyle.Render("No cell selected")
+		}
 
-		// Get the chat content. We subtract a few lines from innerHeight to account for the header.
-		chatContent := m.getLastLines(m.cells[idx].content.String(), innerHeight-4)
-		
-		// Apply a style that takes up the full available width and height
-		detailView := lg.NewStyle().
-			Width(innerWidth).
-			Height(innerHeight).
-			Render(header + chatContent)
+		// Subtle header bar with scenario name
+		cellInfo := m.cells[idx].scenario
+		if cellInfo == "" {
+			cellInfo = fmt.Sprintf("Cell %d", idx+1)
+		}
+		status := string(m.cells[idx].status)
+		header := lg.NewStyle().Foreground(lg.Color("#555555")).
+			Render(cellInfo + " · " + status + " · ↑↓ scroll · esc back")
 
-		return resultContainer.Render(detailView)
+		raw := m.cells[idx].content.String()
+		wrapped := m.wordWrap(raw, innerWidth-4)
+		allLines := strings.Split(wrapped, "\n")
+
+		// Scroll: detailScroll=0 means bottom (latest), higher = further back
+		visibleLines := innerHeight - 2 // header + bottom margin
+		end := len(allLines) - m.detailScroll
+		if end > len(allLines) {
+			end = len(allLines)
+		}
+		if end < 0 {
+			end = 0
+		}
+		start := end - visibleLines
+		if start < 0 {
+			start = 0
+		}
+		if m.detailScroll > len(allLines)-visibleLines {
+			m.detailScroll = len(allLines) - visibleLines
+			if m.detailScroll < 0 {
+				m.detailScroll = 0
+			}
+		}
+
+		chatContent := strings.Join(allLines[start:end], "\n")
+
+		return containerStyle.Render(header + "\n" + chatContent)
+	}
+
+	// Result view: show the evolved agent's prompt
+	if m.mode == ModeResult && FinalResult != nil {
+		title := lg.NewStyle().Foreground(lg.Color("#FFD700")).Bold(true).
+			Render("★ EVOLVED AGENT ★")
+		score := lg.NewStyle().Foreground(lg.Color("#888888")).
+			Render(fmt.Sprintf("Score: %.2f · Genome: %s", FinalResult.BestScore, FinalResult.BestGenome[:12]))
+		hint := lg.NewStyle().Foreground(lg.Color("#555555")).
+			Render("↑↓ scroll · esc back")
+
+		content := title + "\n" + score + "\n" + hint + "\n\n" + FinalResult.BestPrompt
+		wrapped := m.wordWrap(content, innerWidth-4)
+		allLines := strings.Split(wrapped, "\n")
+
+		visibleLines := innerHeight - 1
+		end := len(allLines) - m.resultScroll
+		if end > len(allLines) {
+			end = len(allLines)
+		}
+		if end < 0 {
+			end = 0
+		}
+		start := end - visibleLines
+		if start < 0 {
+			start = 0
+		}
+		if m.resultScroll > len(allLines)-visibleLines {
+			m.resultScroll = len(allLines) - visibleLines
+			if m.resultScroll < 0 {
+				m.resultScroll = 0
+			}
+		}
+
+		return containerStyle.Render(strings.Join(allLines[start:end], "\n"))
 	}
 
 	gridWidth := innerWidth - sidePanelWidth - 1
@@ -252,10 +346,14 @@ func (m *ResultModel) View() string {
 			}
 			idx := r*m.cols + c
 			cell = cell.Width(cellWidth).Height(cellHeight)
-			// Get the last lines
-			cellContent := m.getLastLines(m.cells[idx].content.String(), cellHeight-2)
 
-			// NEW: Truncate lines that are too long
+			if idx >= len(m.cells) {
+				// Empty slot — no cell for this grid position
+				cells = append(cells, cell.Render(""))
+				continue
+			}
+
+			cellContent := m.getLastLines(m.cells[idx].content.String(), cellHeight-2)
 			maxLineWidth := cellWidth - 5
 			cellContent = m.truncateLines(cellContent, maxLineWidth)
 			cells = append(cells, cell.Render(cellContent))
@@ -269,6 +367,11 @@ func (m *ResultModel) View() string {
 		row := i / m.cols
 		col := i % m.cols
 		cellNum := i + 1
+
+		if i >= len(m.cells) {
+			continue
+		}
+
 		status := m.cells[i].status
 		item := fmt.Sprintf("Cell %d: %s", cellNum, status)
 
@@ -286,8 +389,49 @@ func (m *ResultModel) View() string {
 		gridContent,
 		sidePanelStyle.Width(sidePanelWidth).Height(innerHeight).Render(sideContent),
 	)
-	return resultContainer.Render(content)
+	return containerStyle.Render(content)
 }
+func (m *ResultModel) allDone() bool {
+	for i := range m.cells {
+		if m.cells[i].status != StatusDone {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *ResultModel) wordWrap(content string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return content
+	}
+	var result strings.Builder
+	for _, line := range strings.Split(content, "\n") {
+		if len([]rune(line)) <= maxWidth {
+			result.WriteString(line)
+			result.WriteString("\n")
+			continue
+		}
+		words := strings.Fields(line)
+		current := ""
+		for _, word := range words {
+			if current == "" {
+				current = word
+			} else if len([]rune(current))+1+len([]rune(word)) <= maxWidth {
+				current += " " + word
+			} else {
+				result.WriteString(current)
+				result.WriteString("\n")
+				current = word
+			}
+		}
+		if current != "" {
+			result.WriteString(current)
+			result.WriteString("\n")
+		}
+	}
+	return result.String()
+}
+
 func (m *ResultModel) truncateLines(content string, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""

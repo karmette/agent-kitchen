@@ -34,13 +34,14 @@ def log(msg: str):
     print(msg, file=sys.stderr)
 
 
-async def run_scenario(scenario_path: str, db_path: str = None, generation: int = 0):
+async def run_scenario(scenario_path: str, db_path: str = None, generation: int = 0, scenario_id: int = 0):
     """Run a scenario from a JSON file.
 
     Args:
         scenario_path: Path to the scenario JSON file.
         db_path: Override the database path.
         generation: Generation number for event metadata.
+        scenario_id: Scenario index for event routing in the TUI.
 
     Returns:
         Tuple of (db_path, agents_spec)
@@ -61,7 +62,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
         topology_config, scenario["negotiators"], scenario["counterparties"]
     )
 
-    config = {"stream": False}
+    config = {"stream": False, "max_tokens": 2048}
     model = ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,
         model_type=os.getenv("MODEL", ModelType.GPT_4O_MINI),
@@ -101,6 +102,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
         agent_graph=agent_graph,
         platform=oasis.DefaultPlatformType.REDDIT,
         database_path=db_path,
+        semaphore=256,
     )
     sys.stdout = _real_stdout
 
@@ -108,6 +110,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
 
     # Wire up groups
     emit({"type": "simulation_start", "generation": generation,
+          "scenario_id": scenario_id,
           "num_agents": len(agents_spec), "num_groups": len(groups_spec),
           "num_rounds": num_rounds})
 
@@ -127,7 +130,7 @@ async def run_scenario(scenario_path: str, db_path: str = None, generation: int 
     # Start message poller for real-time streaming
     stop_poller = asyncio.Event()
     poller_task = asyncio.create_task(
-        poll_messages(db_path, agents_spec, stop_poller, generation)
+        poll_messages(db_path, agents_spec, stop_poller, generation, scenario_id)
     )
 
     # Simulation rounds

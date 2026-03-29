@@ -21,7 +21,7 @@ type conversation struct {
 
 func newConversation() conversation {
 	return conversation{
-		ch:   make(chan string),
+		ch:   make(chan string, 64),
 		done: make(chan struct{}),
 	}
 }
