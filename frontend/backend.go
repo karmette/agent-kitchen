@@ -62,12 +62,12 @@ type backendEvent struct {
 	NumScenarios   int       `json:"num_scenarios,omitempty"`
 	Goal           string    `json:"goal,omitempty"`
 	// Social mode fields
-	PostID         int       `json:"post_id,omitempty"`
-	CommentID      int       `json:"comment_id,omitempty"`
-	Likes          int       `json:"likes,omitempty"`
-	Dislikes       int       `json:"dislikes,omitempty"`
-	Follower       string    `json:"follower,omitempty"`
-	Followee       string    `json:"followee,omitempty"`
+	PostID    int    `json:"post_id,omitempty"`
+	CommentID int    `json:"comment_id,omitempty"`
+	Likes     int    `json:"likes,omitempty"`
+	Dislikes  int    `json:"dislikes,omitempty"`
+	Follower  string `json:"follower,omitempty"`
+	Followee  string `json:"followee,omitempty"`
 }
 
 var FinalResult *EvolutionResult
@@ -100,17 +100,17 @@ type AgentScore struct {
 }
 
 type EvolutionResult struct {
-	BestPrompt     string
-	BestScore      float64
-	BestGenome     string
-	Goal           string
-	Rubric         string
-	PopSize        int
-	NumGens        int
-	Generations    []GenerationStats
-	FinalScores    []AgentScore
-	AllScores      []AgentScore // all agents across all generations
-	ScenarioNames  []string
+	BestPrompt    string
+	BestScore     float64
+	BestGenome    string
+	Goal          string
+	Rubric        string
+	PopSize       int
+	NumGens       int
+	Generations   []GenerationStats
+	FinalScores   []AgentScore
+	AllScores     []AgentScore // all agents across all generations
+	ScenarioNames []string
 }
 
 func RunBackend(cells []cell, goal, rubricHint string, generations, population int) {
@@ -132,7 +132,11 @@ func RunBackend(cells []cell, goal, rubricHint string, generations, population i
 		defer logFile.Close()
 
 		backendDir := filepath.Join("..", "backend")
-		pythonPath := filepath.Join(backendDir, "..", ".venv", "bin", "python")
+		pythonPath := filepath.Join(backendDir, ".venv", "bin", "python")
+		pythonPath, err = filepath.Abs(pythonPath)
+		if err != nil {
+			return
+		}
 
 		args := []string{
 			"orchestrator.py",

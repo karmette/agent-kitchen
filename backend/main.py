@@ -81,7 +81,7 @@ async def run_scenario(scenario_path: str, db_path: str = None,
             topology_config, scenario["negotiators"],
             scenario.get("counterparties", []))
 
-    config = {"stream": False}
+    config = {"stream": False, "max_tokens": 32000}
     model = ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,
         model_type=os.getenv("MODEL", ModelType.GPT_4O_MINI),

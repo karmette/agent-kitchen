@@ -6,6 +6,37 @@ Agent Kitchen evolves the best AI agent for any social interaction by running na
 
 ---
 
+## Quick Start
+
+### Prerequisites
+- Python 3.11+
+- Go 1.21+
+- An OpenAI-compatible API key
+
+### Setup
+```bash
+# Clone
+git clone https://github.com/karmette/agent-kitchen.git
+cd agent-kitchen
+
+# Backend
+cd backend
+uv sync --no-dev
+
+# Configure API
+cp backend/.env.example backend/.env
+# Edit backend/.env with your API key
+
+# Frontend
+cd ../frontend
+go build -o agent-kitchen
+
+# Run
+./agent-kitchen
+```
+
+---
+
 ## How It Works
 
 ```
@@ -159,38 +190,6 @@ backend/                  Python + OASIS
 ```
 
 Communication: Python emits JSONL events to stdout. Go reads them via a pipe and routes to the TUI in real time. All simulation data is persisted in SQLite (one DB per scenario per generation).
-
----
-
-## Quick Start
-
-### Prerequisites
-- Python 3.11+
-- Go 1.21+
-- An OpenAI-compatible API key
-
-### Setup
-```bash
-# Clone
-git clone https://github.com/karmette/agent-kitchen.git
-cd agent-kitchen
-
-# Backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r backend/requirements.txt
-
-# Configure API
-cp backend/.env.example backend/.env
-# Edit backend/.env with your API key
-
-# Frontend
-cd frontend
-go build -o agent-kitchen
-
-# Run
-./agent-kitchen
-```
 
 ---
 
