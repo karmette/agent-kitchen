@@ -159,6 +159,13 @@ async def run_scenario(scenario_path: str, db_path: str = None,
         counterparty_ids = [aid for aid, _, is_neg, _ in agents_spec if not is_neg]
         for i, post_content in enumerate(seed_posts):
             if i < len(counterparty_ids):
+                # Ensure content is a string (LLM sometimes generates dicts)
+                if isinstance(post_content, dict):
+                    post_content = post_content.get("post",
+                                   post_content.get("content",
+                                   str(post_content)))
+                elif not isinstance(post_content, str):
+                    post_content = str(post_content)
                 agent = env.agent_graph.get_agent(counterparty_ids[i])
                 await env.step({
                     agent: ManualAction(
